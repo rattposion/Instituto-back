@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
-const { PixelConfig } = require('../models');
+const { PrismaClient } = require('@prisma/client');
+const prisma = new PrismaClient();
 const jwt = require('jsonwebtoken');
 
 function auth(req, res, next) {
@@ -17,33 +18,34 @@ function auth(req, res, next) {
 
 // GET /pixel
 router.get('/', async (req, res) => {
-  const config = await PixelConfig.findAll();
+  const config = await prisma.pixelConfig.findMany();
   res.json(config);
 });
 
 // POST /pixel (protegido)
 router.post('/', auth, async (req, res) => {
   const { pixelId, enabled } = req.body;
-  const config = await PixelConfig.create({ pixelId, enabled });
+  const config = await prisma.pixelConfig.create({ data: { pixelId, enabled } });
   res.json(config);
 });
 
 // PUT /pixel/:id (protegido)
 router.put('/:id', auth, async (req, res) => {
   const { pixelId, enabled } = req.body;
-  const config = await PixelConfig.findByPk(req.params.id);
+  const config = await prisma.pixelConfig.update({
+    where: { id: Number(req.params.id) },
+    data: { pixelId, enabled }
+  }).catch(() => null);
   if (!config) return res.status(404).json({ error: 'Não encontrado' });
-  config.pixelId = pixelId;
-  config.enabled = enabled;
-  await config.save();
   res.json(config);
 });
 
 // DELETE /pixel/:id (protegido)
 router.delete('/:id', auth, async (req, res) => {
-  const config = await PixelConfig.findByPk(req.params.id);
+  const config = await prisma.pixelConfig.delete({
+    where: { id: Number(req.params.id) }
+  }).catch(() => null);
   if (!config) return res.status(404).json({ error: 'Não encontrado' });
-  await config.destroy();
   res.json({ success: true });
 });
 

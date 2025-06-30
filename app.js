@@ -2,12 +2,23 @@ var express = require('express');
 var path = require('path');
 var cookieParser = require('cookie-parser');
 var logger = require('morgan');
+const cors = require('cors');
 
 var indexRouter = require('./routes/index');
 var usersRouter = require('./routes/users');
 const fbCapiRouter = require('./routes/fb-capi');
 
 var app = express();
+
+const allowedOrigins = [
+  'https://seu-frontend.vercel.app', // produção (ajuste para o domínio real do seu frontend)
+  'http://localhost:5173'            // desenvolvimento local
+];
+
+app.use(cors({
+  origin: allowedOrigins,
+  credentials: true
+}));
 
 app.use(logger('dev'));
 app.use(express.json());

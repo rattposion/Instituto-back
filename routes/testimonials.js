@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
-const { Testimonial } = require('../models');
+const { PrismaClient } = require('@prisma/client');
+const prisma = new PrismaClient();
 const jwt = require('jsonwebtoken');
 
 function auth(req, res, next) {
@@ -17,33 +18,34 @@ function auth(req, res, next) {
 
 // GET /testimonials
 router.get('/', async (req, res) => {
-  const testimonials = await Testimonial.findAll();
+  const testimonials = await prisma.testimonial.findMany();
   res.json(testimonials);
 });
 
 // POST /testimonials (protegido)
 router.post('/', auth, async (req, res) => {
   const { name, text } = req.body;
-  const testimonial = await Testimonial.create({ name, text });
+  const testimonial = await prisma.testimonial.create({ data: { name, text } });
   res.json(testimonial);
 });
 
 // PUT /testimonials/:id (protegido)
 router.put('/:id', auth, async (req, res) => {
   const { name, text } = req.body;
-  const testimonial = await Testimonial.findByPk(req.params.id);
+  const testimonial = await prisma.testimonial.update({
+    where: { id: Number(req.params.id) },
+    data: { name, text }
+  }).catch(() => null);
   if (!testimonial) return res.status(404).json({ error: 'Não encontrado' });
-  testimonial.name = name;
-  testimonial.text = text;
-  await testimonial.save();
   res.json(testimonial);
 });
 
 // DELETE /testimonials/:id (protegido)
 router.delete('/:id', auth, async (req, res) => {
-  const testimonial = await Testimonial.findByPk(req.params.id);
+  const testimonial = await prisma.testimonial.delete({
+    where: { id: Number(req.params.id) }
+  }).catch(() => null);
   if (!testimonial) return res.status(404).json({ error: 'Não encontrado' });
-  await testimonial.destroy();
   res.json({ success: true });
 });
 
