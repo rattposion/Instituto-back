@@ -43,7 +43,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 app.use('/', indexRouter);
 app.use('/users', usersRouter);
 app.use('/fb-capi', fbCapiRouter);
-app.use('/pixel', pixelRouter);
+// app.use('/pixel', pixelRouter); // Removido para evitar conflito e problemas de CORS
 
 // Prefixo /api para todas as rotas
 app.use('/api/auth', authRoutes);
