@@ -1,5 +1,7 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
+// ===============================
+// Prisma Schema para Painel Admin
+// Gerenciamento de Facebook Pixel
+// ===============================
 
 // Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
 // Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
@@ -13,32 +15,151 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// ===============================
+// MODELS PRINCIPAIS
+// ===============================
+
+/// Usuário do sistema (admin, gerente, viewer, etc)
 model User {
-  id       Int    @id @default(autoincrement())
-  username String
-  password String
+  id             String   @id @default(cuid()) // Identificador único
+  name           String?  // Nome do usuário
+  email          String   @unique // E-mail único
+  emailVerified  DateTime? // Data de verificação do e-mail
+  image          String?  // URL da imagem/avatar
+  hashedPassword String?  // Senha criptografada (para login local)
+  role           Role     @default(USER) // Papel global do usuário
+
+  // Relacionamentos
+  workspaces     WorkspaceMember[] // Membro de workspaces
+  pixels         Pixel[]           // Pixels criados pelo usuário
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 }
 
-model Testimonial {
-  id   Int    @id @default(autoincrement())
-  name String
-  text String
+/// Workspace (espaço de trabalho) para times, agências, empresas, etc
+model Workspace {
+  id        String             @id @default(cuid()) // ID único
+  name      String             // Nome do workspace
+  ownerId   String             // ID do dono
+  owner     User               @relation(fields: [ownerId], references: [id]) // Dono do workspace
+  members   WorkspaceMember[]  // Membros do workspace
+  pixels    Pixel[]            // Pixels pertencentes ao workspace
+  createdAt DateTime           @default(now())
+  updatedAt DateTime           @updatedAt
 }
 
-model News {
-  id      Int    @id @default(autoincrement())
-  title   String
-  content String
+/// Membro de um workspace, com role específica
+model WorkspaceMember {
+  id          String   @id @default(cuid()) // ID único
+  role        Role     @default(USER) // Papel no workspace (ADMIN, MANAGER, USER)
+  userId      String   // ID do usuário
+  workspaceId String   // ID do workspace
+
+  // Relacionamentos
+  user        User     @relation(fields: [userId], references: [id])
+  workspace   Workspace @relation(fields: [workspaceId], references: [id])
 }
 
-model SiteInfo {
-  id    Int    @id @default(autoincrement())
-  key   String
-  value String
+/// Pixel do Facebook (Meta Pixel)
+model Pixel {
+  id          String      @id @default(cuid()) // ID único
+  name        String      // Nome amigável do Pixel
+  pixelId     String      @unique // ID do Pixel fornecido pela Meta
+  status      PixelStatus @default(ACTIVE) // Status (ativo/inativo)
+  workspaceId String      // Workspace ao qual pertence
+  ownerId     String      // Usuário criador
+  lastEventAt DateTime?   // Data do último evento recebido
+
+  // Relacionamentos
+  workspace   Workspace   @relation(fields: [workspaceId], references: [id])
+  owner       User        @relation(fields: [ownerId], references: [id])
+  events      Event[]     // Eventos recebidos por este Pixel
+  conversions CustomConversion[] // Conversões personalizadas
+  logs        PixelLog[]  // Logs de eventos e diagnósticos
+  capiConfig  CAPIConfig? // Configuração do Conversion API
+  alerts      Alert[]     // Alertas relacionados ao Pixel
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
 }
 
-model PixelConfig {
-  id      Int    @id @default(autoincrement())
-  pixelId String
-  enabled Boolean
+/// Evento recebido pelo Pixel (PageView, AddToCart, Purchase, etc)
+model Event {
+  id         String   @id @default(cuid()) // ID único
+  pixelId    String   // Pixel relacionado
+  type       String   // Tipo do evento (PageView, AddToCart, etc)
+  data       Json     // Dados do evento (value, currency, etc)
+  receivedAt DateTime @default(now()) // Data/hora do recebimento
+
+  // Relacionamento
+  pixel      Pixel    @relation(fields: [pixelId], references: [id])
+}
+
+/// Conversão personalizada (regras por URL, funis, etc)
+model CustomConversion {
+  id        String   @id @default(cuid()) // ID único
+  name      String   // Nome da conversão
+  rules     Json     // Regras (ex: URLs, eventos)
+  pixelId   String   // Pixel relacionado
+  pixel     Pixel    @relation(fields: [pixelId], references: [id])
+  createdAt DateTime @default(now())
+}
+
+/// Log de eventos, erros e diagnósticos do Pixel
+model PixelLog {
+  id        String   @id @default(cuid()) // ID único
+  pixelId   String   // Pixel relacionado
+  message   String   // Mensagem do log
+  level     LogLevel @default(INFO) // Nível (INFO, WARNING, ERROR)
+  createdAt DateTime @default(now())
+
+  // Relacionamento
+  pixel     Pixel    @relation(fields: [pixelId], references: [id])
+}
+
+/// Configuração do Conversion API (CAPI) para envio de eventos via backend
+model CAPIConfig {
+  id        String   @id @default(cuid()) // ID único
+  pixelId   String   @unique // Pixel relacionado
+  token     String   // Token de acesso do servidor
+  enabled   Boolean  @default(true) // Se está ativo
+  createdAt DateTime @default(now())
+
+  // Relacionamento
+  pixel     Pixel    @relation(fields: [pixelId], references: [id])
+}
+
+/// Alertas e notificações (pixel inativo, erro, etc)
+model Alert {
+  id          String   @id @default(cuid()) // ID único
+  pixelId     String   // Pixel relacionado
+  type        String   // Tipo do alerta (ex: INACTIVE, ERROR, CONVERSION_DROP)
+  message     String   // Mensagem do alerta
+  triggeredAt DateTime @default(now()) // Quando foi disparado
+
+  // Relacionamento
+  pixel       Pixel    @relation(fields: [pixelId], references: [id])
+}
+
+// ===============================
+// ENUMS
+// ===============================
+
+/// Papéis de usuário e membros
+enum Role {
+  ADMIN    // Acesso total
+  MANAGER  // Gerente (acesso parcial)
+  USER     // Visualizador ou membro comum
+}
+
+/// Status do Pixel
+enum PixelStatus {
+  ACTIVE    // Pixel ativo
+  INACTIVE  // Pixel inativo
+}
+
+/// Níveis de log
+enum LogLevel {
+  INFO     // Informativo
+  WARNING  // Aviso
+  ERROR    // Erro
 }
