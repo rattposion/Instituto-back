@@ -18,22 +18,22 @@ function auth(req, res, next) {
 
 // GET /pixel
 router.get('/', async (req, res) => {
-  const config = await prisma.pixelConfig.findMany();
+  const config = await prisma.cAPIConfig.findMany();
   res.json(config);
 });
 
 // POST /pixel (protegido)
 router.post('/', auth, async (req, res) => {
   const { pixelId, enabled } = req.body;
-  const config = await prisma.pixelConfig.create({ data: { pixelId, enabled } });
+  const config = await prisma.cAPIConfig.create({ data: { pixelId, enabled } });
   res.json(config);
 });
 
 // PUT /pixel/:id (protegido)
 router.put('/:id', auth, async (req, res) => {
   const { pixelId, enabled } = req.body;
-  const config = await prisma.pixelConfig.update({
-    where: { id: Number(req.params.id) },
+  const config = await prisma.cAPIConfig.update({
+    where: { id: req.params.id },
     data: { pixelId, enabled }
   }).catch(() => null);
   if (!config) return res.status(404).json({ error: 'Não encontrado' });
@@ -42,8 +42,8 @@ router.put('/:id', auth, async (req, res) => {
 
 // DELETE /pixel/:id (protegido)
 router.delete('/:id', auth, async (req, res) => {
-  const config = await prisma.pixelConfig.delete({
-    where: { id: Number(req.params.id) }
+  const config = await prisma.cAPIConfig.delete({
+    where: { id: req.params.id }
   }).catch(() => null);
   if (!config) return res.status(404).json({ error: 'Não encontrado' });
   res.json({ success: true });
