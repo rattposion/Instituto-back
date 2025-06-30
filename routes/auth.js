@@ -7,7 +7,7 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
-const JWT_SECRET = process.env.JWT_SECRET || 'sua_chave_secreta';
+const JWT_SECRET = 'temporario_teste'; // Valor fixo temporário para debug
 
 // =========================
 // Registro de novo usuário
