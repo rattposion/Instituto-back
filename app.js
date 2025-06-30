@@ -12,7 +12,7 @@ const pixelRouter = require('./routes/pixel');
 var app = express();
 
 const allowedOrigins = [
-  'instituto-viva.vercel.app', // produção (ajuste para o domínio real do seu frontend)
+  'https://instituto-viva.vercel.app', // produção (ajuste para o domínio real do seu frontend)
   'http://localhost:5173'            // desenvolvimento local
 ];
 
