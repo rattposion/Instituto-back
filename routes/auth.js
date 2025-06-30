@@ -69,4 +69,9 @@ router.get('/oauth/meta', (req, res) => {
   res.json({ message: 'OAuth Meta não implementado neste exemplo.' });
 });
 
+// Endpoint temporário para debug do JWT_SECRET (remova após o teste!)
+router.get('/debug/jwt-secret', (req, res) => {
+  res.json({ JWT_SECRET: process.env.JWT_SECRET || 'NÃO DEFINIDO' });
+});
+
 module.exports = router; 
