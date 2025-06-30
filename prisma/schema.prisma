@@ -32,6 +32,7 @@ model User {
   // Relacionamentos
   workspaces     WorkspaceMember[] // Membro de workspaces
   pixels         Pixel[]           // Pixels criados pelo usuário
+  workspacesOwned Workspace[] @relation("WorkspaceOwner") // Relação inversa para owner de Workspace
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 }
@@ -41,7 +42,7 @@ model Workspace {
   id        String             @id @default(cuid()) // ID único
   name      String             // Nome do workspace
   ownerId   String             // ID do dono
-  owner     User               @relation(fields: [ownerId], references: [id]) // Dono do workspace
+  owner     User               @relation("WorkspaceOwner", fields: [ownerId], references: [id]) // Dono do workspace
   members   WorkspaceMember[]  // Membros do workspace
   pixels    Pixel[]            // Pixels pertencentes ao workspace
   createdAt DateTime           @default(now())
