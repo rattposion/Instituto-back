@@ -24,7 +24,7 @@ export const authenticate = async (req: AuthRequest, res: Response, next: NextFu
     
     // Verify user exists and is active
     const { data: user, error } = await prisma
-      .queryRaw`
+      .$queryRaw`
         SELECT id, workspace_id, role, is_active
         FROM users
         WHERE id = ${decoded.userId} AND is_active = true
@@ -72,7 +72,7 @@ export const validateWorkspace = async (req: AuthRequest, res: Response, next: N
 
     // Check if user has access to workspace
     const { data: member, error } = await prisma
-      .queryRaw`
+      .$queryRaw`
         SELECT role
         FROM workspace_members
         WHERE workspace_id = ${workspaceId} AND user_id = ${req.user!.id}

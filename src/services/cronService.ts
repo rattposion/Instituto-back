@@ -33,7 +33,7 @@ export function startCronJobs() {
 async function runPixelDiagnostics() {
   try {
     // Get all active pixels
-    const pixels = await prisma.pixels.findMany({
+    const pixels = await prisma.pixel.findMany({
       where: {
         status: 'active'
       }
@@ -52,7 +52,7 @@ async function checkPixelHealth(pixel: any) {
   const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
 
   // Check for recent events
-  const recentEvents = await prisma.events.findMany({
+  const recentEvents = await prisma.event.findMany({
     where: {
       pixel_id: pixel.id,
       timestamp: {
@@ -64,7 +64,7 @@ async function checkPixelHealth(pixel: any) {
 
   // Create diagnostic if no recent events
   if (recentEvents.length === 0) {
-    await prisma.diagnostics.upsert({
+    await prisma.diagnostic.upsert({
       where: {
         pixel_id_title: {
           pixel_id: pixel.id,
@@ -87,7 +87,7 @@ async function checkPixelHealth(pixel: any) {
     });
 
     // Update pixel status
-    await prisma.pixels.update({
+    await prisma.pixel.update({
       where: {
         id: pixel.id
       },
@@ -97,7 +97,7 @@ async function checkPixelHealth(pixel: any) {
     });
   } else {
     // Resolve diagnostic if exists
-    await prisma.diagnostics.update({
+    await prisma.diagnostic.update({
       where: {
         pixel_id_title: {
           pixel_id: pixel.id,
@@ -117,7 +117,7 @@ async function cleanupOldEvents() {
     const cutoffDate = new Date();
     cutoffDate.setDate(cutoffDate.getDate() - retentionDays);
 
-    const events = await prisma.events.deleteMany({
+    const events = await prisma.event.deleteMany({
       where: {
         timestamp: {
           lt: cutoffDate.toISOString()
@@ -136,7 +136,7 @@ async function cleanupOldEvents() {
 async function updatePixelStatistics() {
   try {
     // Get all pixels
-    const pixels = await prisma.pixels.findMany({
+    const pixels = await prisma.pixel.findMany({
       select: {
         id: true
       }
@@ -155,7 +155,7 @@ async function updatePixelStats(pixelId: string) {
   last24Hours.setDate(last24Hours.getDate() - 1);
 
   // Get events count and revenue for last 24 hours
-  const events = await prisma.events.findMany({
+  const events = await prisma.event.findMany({
     select: {
       event_name: true,
       parameters: true
@@ -179,7 +179,7 @@ async function updatePixelStats(pixelId: string) {
   });
 
   // Update pixel statistics
-  await prisma.pixels.update({
+  await prisma.pixel.update({
     where: {
       id: pixelId
     },
@@ -198,7 +198,7 @@ async function processFailedEvents() {
     const oneHourAgo = new Date();
     oneHourAgo.setHours(oneHourAgo.getHours() - 1);
 
-    const failedEvents = await prisma.events.findMany({
+    const failedEvents = await prisma.event.findMany({
       where: {
         error_message: {
           not: null
@@ -217,7 +217,7 @@ async function processFailedEvents() {
         const success = Math.random() > 0.3; // 70% success rate on retry
         
         if (success) {
-          await prisma.events.update({
+          await prisma.event.update({
             where: {
               id: event.id
             },
