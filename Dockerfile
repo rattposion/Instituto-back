@@ -6,14 +6,17 @@ WORKDIR /app
 # Copy package files
 COPY package*.json ./
 
-# Install dependencies
-RUN npm ci --only=production
+# Instala todas as dependências (incluindo dev)
+RUN npm ci
 
 # Copy source code
 COPY . .
 
 # Build the application
 RUN npm run build
+
+# Remove dependências de desenvolvimento após o build
+RUN npm prune --production
 
 # Create logs directory
 RUN mkdir -p logs
