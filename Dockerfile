@@ -11,9 +11,6 @@ RUN npm ci
 # Copy source code
 COPY . .
 
-# Copy variáveis de ambiente
-COPY .env .
-
 # Build the application
 RUN npm run build
 
