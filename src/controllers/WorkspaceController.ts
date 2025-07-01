@@ -1,5 +1,5 @@
 import { Response } from 'express';
-import { supabase } from '../config/database';
+import { Database } from '../config/database';
 import { AuthRequest } from '../middleware/auth';
 import { createError } from '../middleware/errorHandler';
 import { logger } from '../utils/logger';
@@ -10,15 +10,15 @@ export class WorkspaceController {
     const { page = 1, limit = 20, search } = req.query;
     const offset = (Number(page) - 1) * Number(limit);
 
-    let query = supabase
-      .from('workspace_members')
-      .select(`
+    let query = Database.query(`
+      SELECT
         workspaces!inner(id, name, slug, description, is_active, created_at),
         role
-      `, { count: 'exact' })
-      .eq('user_id', req.user!.id)
-      .range(offset, offset + Number(limit) - 1)
-      .order('created_at', { ascending: false });
+      FROM workspace_members
+      WHERE user_id = ${req.user!.id}
+      ORDER BY created_at DESC
+      LIMIT ${limit} OFFSET ${offset}
+    `);
 
     if (search) {
       query = query.ilike('workspaces.name', `%${search}%`);
@@ -55,19 +55,11 @@ export class WorkspaceController {
     const slug = name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
 
     // Create workspace
-    const { data: workspace, error: workspaceError } = await supabase
-      .from('workspaces')
-      .insert({
-        id: workspaceId,
-        name,
-        slug,
-        description,
-        owner_id: req.user!.id,
-        settings: {},
-        is_active: true
-      })
-      .select()
-      .single();
+    const { data: workspace, error: workspaceError } = await Database.query(`
+      INSERT INTO workspaces (id, name, slug, description, owner_id, settings, is_active)
+      VALUES (${workspaceId}, ${name}, ${slug}, ${description}, ${req.user!.id}, {}, true)
+      RETURNING *
+    `);
 
     if (workspaceError) {
       logger.error('Error creating workspace:', workspaceError);
@@ -75,21 +67,15 @@ export class WorkspaceController {
     }
 
     // Add user as admin member
-    const { error: memberError } = await supabase
-      .from('workspace_members')
-      .insert({
-        id: uuidv4(),
-        workspace_id: workspaceId,
-        user_id: req.user!.id,
-        role: 'admin',
-        invited_by: req.user!.id,
-        joined_at: new Date().toISOString()
-      });
+    const { error: memberError } = await Database.query(`
+      INSERT INTO workspace_members (id, workspace_id, user_id, role, invited_by, joined_at)
+      VALUES (${uuidv4()}, ${workspaceId}, ${req.user!.id}, 'admin', ${req.user!.id}, ${new Date().toISOString()})
+    `);
 
     if (memberError) {
       logger.error('Error adding workspace member:', memberError);
       // Cleanup workspace
-      await supabase.from('workspaces').delete().eq('id', workspaceId);
+      await Database.query(`DELETE FROM workspaces WHERE id = ${workspaceId}`);
       throw createError('Failed to create workspace', 500);
     }
 
@@ -103,22 +89,23 @@ export class WorkspaceController {
     const { id } = req.params;
 
     // Check if user has access to workspace
-    const { data: member, error: memberError } = await supabase
-      .from('workspace_members')
-      .select('role')
-      .eq('workspace_id', id)
-      .eq('user_id', req.user!.id)
-      .single();
+    const { data: member, error: memberError } = await Database.query(`
+      SELECT role
+      FROM workspace_members
+      WHERE workspace_id = ${id} AND user_id = ${req.user!.id}
+      LIMIT 1
+    `);
 
     if (memberError || !member) {
       throw createError('Workspace not found', 404);
     }
 
-    const { data: workspace, error } = await supabase
-      .from('workspaces')
-      .select('*')
-      .eq('id', id)
-      .single();
+    const { data: workspace, error } = await Database.query(`
+      SELECT *
+      FROM workspaces
+      WHERE id = ${id}
+      LIMIT 1
+    `);
 
     if (error || !workspace) {
       throw createError('Workspace not found', 404);
@@ -138,13 +125,12 @@ export class WorkspaceController {
     const { name, description, settings } = req.body;
 
     // Check if user is admin of workspace
-    const { data: member, error: memberError } = await supabase
-      .from('workspace_members')
-      .select('role')
-      .eq('workspace_id', id)
-      .eq('user_id', req.user!.id)
-      .eq('role', 'admin')
-      .single();
+    const { data: member, error: memberError } = await Database.query(`
+      SELECT role
+      FROM workspace_members
+      WHERE workspace_id = ${id} AND user_id = ${req.user!.id} AND role = 'admin'
+      LIMIT 1
+    `);
 
     if (memberError || !member) {
       throw createError('Access denied', 403);
@@ -161,12 +147,16 @@ export class WorkspaceController {
     if (description !== undefined) updateData.description = description;
     if (settings !== undefined) updateData.settings = settings;
 
-    const { data: workspace, error } = await supabase
-      .from('workspaces')
-      .update(updateData)
-      .eq('id', id)
-      .select()
-      .single();
+    const { data: workspace, error } = await Database.query(`
+      UPDATE workspaces
+      SET name = ${updateData.name},
+          slug = ${updateData.slug},
+          description = ${updateData.description},
+          settings = ${updateData.settings},
+          updated_at = ${updateData.updated_at}
+      WHERE id = ${id}
+      RETURNING *
+    `);
 
     if (error) {
       logger.error('Error updating workspace:', error);
@@ -183,22 +173,19 @@ export class WorkspaceController {
     const { id } = req.params;
 
     // Check if user is owner of workspace
-    const { data: workspace, error: workspaceError } = await supabase
-      .from('workspaces')
-      .select('owner_id, name')
-      .eq('id', id)
-      .eq('owner_id', req.user!.id)
-      .single();
+    const { data: workspace, error: workspaceError } = await Database.query(`
+      SELECT owner_id, name
+      FROM workspaces
+      WHERE id = ${id} AND owner_id = ${req.user!.id}
+      LIMIT 1
+    `);
 
     if (workspaceError || !workspace) {
       throw createError('Workspace not found or access denied', 404);
     }
 
     // Delete workspace (cascade will handle related data)
-    const { error } = await supabase
-      .from('workspaces')
-      .delete()
-      .eq('id', id);
+    const { error } = await Database.query(`DELETE FROM workspaces WHERE id = ${id}`);
 
     if (error) {
       logger.error('Error deleting workspace:', error);
@@ -217,26 +204,26 @@ export class WorkspaceController {
     const offset = (Number(page) - 1) * Number(limit);
 
     // Check if user has access to workspace
-    const { data: userMember, error: memberError } = await supabase
-      .from('workspace_members')
-      .select('role')
-      .eq('workspace_id', id)
-      .eq('user_id', req.user!.id)
-      .single();
+    const { data: userMember, error: memberError } = await Database.query(`
+      SELECT role
+      FROM workspace_members
+      WHERE workspace_id = ${id} AND user_id = ${req.user!.id}
+      LIMIT 1
+    `);
 
     if (memberError || !userMember) {
       throw createError('Workspace not found', 404);
     }
 
-    let query = supabase
-      .from('workspace_members')
-      .select(`
+    let query = Database.query(`
+      SELECT
         id, role, joined_at, created_at,
         users!inner(id, name, email, avatar, last_login)
-      `, { count: 'exact' })
-      .eq('workspace_id', id)
-      .range(offset, offset + Number(limit) - 1)
-      .order('created_at', { ascending: false });
+      FROM workspace_members
+      WHERE workspace_id = ${id}
+      ORDER BY created_at DESC
+      LIMIT ${limit} OFFSET ${offset}
+    `);
 
     if (search) {
       query = query.or(`users.name.ilike.%${search}%,users.email.ilike.%${search}%`);
@@ -270,56 +257,48 @@ export class WorkspaceController {
     const { email, role } = req.body;
 
     // Check if user can invite to workspace
-    const { data: userMember, error: memberError } = await supabase
-      .from('workspace_members')
-      .select('role')
-      .eq('workspace_id', id)
-      .eq('user_id', req.user!.id)
-      .single();
+    const { data: userMember, error: memberError } = await Database.query(`
+      SELECT role
+      FROM workspace_members
+      WHERE workspace_id = ${id} AND user_id = ${req.user!.id}
+      LIMIT 1
+    `);
 
     if (memberError || !userMember || !['admin', 'manager'].includes(userMember.role)) {
       throw createError('Access denied', 403);
     }
 
     // Check if user exists
-    const { data: invitedUser, error: userError } = await supabase
-      .from('users')
-      .select('id, name')
-      .eq('email', email)
-      .single();
+    const { data: invitedUser, error: userError } = await Database.query(`
+      SELECT id, name
+      FROM users
+      WHERE email = ${email}
+      LIMIT 1
+    `);
 
     if (userError || !invitedUser) {
       throw createError('User not found', 404);
     }
 
     // Check if user is already a member
-    const { data: existingMember } = await supabase
-      .from('workspace_members')
-      .select('id')
-      .eq('workspace_id', id)
-      .eq('user_id', invitedUser.id)
-      .single();
+    const { data: existingMember } = await Database.query(`
+      SELECT id
+      FROM workspace_members
+      WHERE workspace_id = ${id} AND user_id = ${invitedUser.id}
+      LIMIT 1
+    `);
 
     if (existingMember) {
       throw createError('User is already a member of this workspace', 409);
     }
 
     // Add member to workspace
-    const { data: member, error } = await supabase
-      .from('workspace_members')
-      .insert({
-        id: uuidv4(),
-        workspace_id: id,
-        user_id: invitedUser.id,
-        role,
-        invited_by: req.user!.id,
-        joined_at: new Date().toISOString()
-      })
-      .select(`
-        id, role, joined_at, created_at,
-        users!inner(id, name, email, avatar)
-      `)
-      .single();
+    const { data: member, error } = await Database.query(`
+      INSERT INTO workspace_members (id, workspace_id, user_id, role, invited_by, joined_at)
+      VALUES (${uuidv4()}, ${id}, ${invitedUser.id}, ${role}, ${req.user!.id}, ${new Date().toISOString()})
+      RETURNING id, role, joined_at, created_at,
+                users!inner(id, name, email, avatar)
+    `);
 
     if (error) {
       logger.error('Error inviting member:', error);
@@ -338,35 +317,31 @@ export class WorkspaceController {
     const { id, userId } = req.params;
 
     // Check if user is admin of workspace
-    const { data: userMember, error: memberError } = await supabase
-      .from('workspace_members')
-      .select('role')
-      .eq('workspace_id', id)
-      .eq('user_id', req.user!.id)
-      .eq('role', 'admin')
-      .single();
+    const { data: userMember, error: memberError } = await Database.query(`
+      SELECT role
+      FROM workspace_members
+      WHERE workspace_id = ${id} AND user_id = ${req.user!.id} AND role = 'admin'
+      LIMIT 1
+    `);
 
     if (memberError || !userMember) {
       throw createError('Access denied', 403);
     }
 
     // Prevent removing workspace owner
-    const { data: workspace } = await supabase
-      .from('workspaces')
-      .select('owner_id')
-      .eq('id', id)
-      .single();
+    const { data: workspace } = await Database.query(`
+      SELECT owner_id
+      FROM workspaces
+      WHERE id = ${id}
+      LIMIT 1
+    `);
 
     if (workspace?.owner_id === userId) {
       throw createError('Cannot remove workspace owner', 400);
     }
 
     // Remove member
-    const { error } = await supabase
-      .from('workspace_members')
-      .delete()
-      .eq('workspace_id', id)
-      .eq('user_id', userId);
+    const { error } = await Database.query(`DELETE FROM workspace_members WHERE workspace_id = ${id} AND user_id = ${userId}`);
 
     if (error) {
       logger.error('Error removing member:', error);
@@ -384,40 +359,37 @@ export class WorkspaceController {
     const { role } = req.body;
 
     // Check if user is admin of workspace
-    const { data: userMember, error: memberError } = await supabase
-      .from('workspace_members')
-      .select('role')
-      .eq('workspace_id', id)
-      .eq('user_id', req.user!.id)
-      .eq('role', 'admin')
-      .single();
+    const { data: userMember, error: memberError } = await Database.query(`
+      SELECT role
+      FROM workspace_members
+      WHERE workspace_id = ${id} AND user_id = ${req.user!.id} AND role = 'admin'
+      LIMIT 1
+    `);
 
     if (memberError || !userMember) {
       throw createError('Access denied', 403);
     }
 
     // Prevent changing workspace owner role
-    const { data: workspace } = await supabase
-      .from('workspaces')
-      .select('owner_id')
-      .eq('id', id)
-      .single();
+    const { data: workspace } = await Database.query(`
+      SELECT owner_id
+      FROM workspaces
+      WHERE id = ${id}
+      LIMIT 1
+    `);
 
     if (workspace?.owner_id === userId && role !== 'admin') {
       throw createError('Cannot change workspace owner role', 400);
     }
 
     // Update member role
-    const { data: member, error } = await supabase
-      .from('workspace_members')
-      .update({ role })
-      .eq('workspace_id', id)
-      .eq('user_id', userId)
-      .select(`
-        id, role, joined_at, created_at,
-        users!inner(id, name, email, avatar)
-      `)
-      .single();
+    const { data: member, error } = await Database.query(`
+      UPDATE workspace_members
+      SET role = ${role}
+      WHERE workspace_id = ${id} AND user_id = ${userId}
+      RETURNING id, role, joined_at, created_at,
+                users!inner(id, name, email, avatar)
+    `);
 
     if (error) {
       logger.error('Error updating member role:', error);
@@ -435,12 +407,12 @@ export class WorkspaceController {
     const { timeframe = '7d' } = req.query;
 
     // Check if user has access to workspace
-    const { data: member, error: memberError } = await supabase
-      .from('workspace_members')
-      .select('role')
-      .eq('workspace_id', id)
-      .eq('user_id', req.user!.id)
-      .single();
+    const { data: member, error: memberError } = await Database.query(`
+      SELECT role
+      FROM workspace_members
+      WHERE workspace_id = ${id} AND user_id = ${req.user!.id}
+      LIMIT 1
+    `);
 
     if (memberError || !member) {
       throw createError('Workspace not found', 404);
@@ -467,30 +439,31 @@ export class WorkspaceController {
     // Get workspace statistics
     const [pixelsResult, eventsResult, conversionsResult] = await Promise.all([
       // Pixels count
-      supabase
-        .from('pixels')
-        .select('id, status')
-        .eq('workspace_id', id),
+      Database.query(`
+        SELECT id, status
+        FROM pixels
+        WHERE workspace_id = ${id}
+      `),
       
       // Events in timeframe
-      supabase
-        .from('events')
-        .select(`
+      Database.query(`
+        SELECT
           event_name, timestamp, parameters,
           pixels!inner(workspace_id)
-        `)
-        .eq('pixels.workspace_id', id)
-        .gte('timestamp', startDate.toISOString())
-        .lte('timestamp', endDate.toISOString()),
+        FROM events
+        WHERE pixels.workspace_id = ${id}
+        AND timestamp >= ${startDate.toISOString()}
+        AND timestamp <= ${endDate.toISOString()}
+      `),
       
       // Conversions
-      supabase
-        .from('conversions')
-        .select(`
+      Database.query(`
+        SELECT
           total_conversions, total_value,
           pixels!inner(workspace_id)
-        `)
-        .eq('pixels.workspace_id', id)
+        FROM conversions
+        WHERE pixels.workspace_id = ${id}
+      `)
     ]);
 
     const pixels = pixelsResult.data || [];

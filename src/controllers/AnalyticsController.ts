@@ -1,5 +1,5 @@
 import { Response } from 'express';
-import { supabase } from '../config/database';
+import { Database } from '../config/database';
 import { AuthRequest } from '../middleware/auth';
 import { createError } from '../middleware/errorHandler';
 import { logger } from '../utils/logger';
@@ -30,45 +30,40 @@ export class AnalyticsController {
       // Get all data in parallel
       const [pixelsResult, eventsResult, conversionsResult, diagnosticsResult] = await Promise.all([
         // Pixels data
-        supabase
-          .from('pixels')
-          .select('id, status, events_count, conversions_count, revenue')
-          .eq('workspace_id', req.user!.workspaceId),
+        Database.query('SELECT id, status, events_count, conversions_count, revenue FROM pixels WHERE workspace_id = $1', [req.user!.workspaceId]),
         
         // Events data
-        supabase
-          .from('events')
-          .select(`
-            event_name, timestamp, parameters, processed,
-            pixels!inner(workspace_id)
-          `)
-          .eq('pixels.workspace_id', req.user!.workspaceId)
-          .gte('timestamp', startDate.toISOString())
-          .lte('timestamp', endDate.toISOString()),
+        Database.query(`
+          SELECT event_name, timestamp, parameters, processed,
+          pixels.workspace_id, pixels.id AS pixel_id
+          FROM events
+          INNER JOIN pixels ON events.pixel_id = pixels.id
+          WHERE pixels.workspace_id = $1 AND timestamp >= $2 AND timestamp <= $3
+        `, [req.user!.workspaceId, startDate.toISOString(), endDate.toISOString()]),
         
         // Conversions data
-        supabase
-          .from('conversions')
-          .select(`
-            total_conversions, total_value, conversion_rate,
-            pixels!inner(workspace_id)
-          `)
-          .eq('pixels.workspace_id', req.user!.workspaceId),
+        Database.query(`
+          SELECT total_conversions, total_value, conversion_rate,
+          pixels.workspace_id, pixels.id AS pixel_id
+          FROM conversions
+          INNER JOIN pixels ON conversions.pixel_id = pixels.id
+          WHERE pixels.workspace_id = $1
+        `, [req.user!.workspaceId]),
         
         // Diagnostics data
-        supabase
-          .from('diagnostics')
-          .select(`
-            severity, status,
-            pixels!inner(workspace_id)
-          `)
-          .eq('pixels.workspace_id', req.user!.workspaceId)
+        Database.query(`
+          SELECT severity, status,
+          pixels.workspace_id, pixels.id AS pixel_id
+          FROM diagnostics
+          INNER JOIN pixels ON diagnostics.pixel_id = pixels.id
+          WHERE pixels.workspace_id = $1
+        `, [req.user!.workspaceId])
       ]);
 
-      const pixels = pixelsResult.data || [];
-      const events = eventsResult.data || [];
-      const conversions = conversionsResult.data || [];
-      const diagnostics = diagnosticsResult.data || [];
+      const pixels = pixelsResult.rows || [];
+      const events = eventsResult.rows || [];
+      const conversions = conversionsResult.rows || [];
+      const diagnostics = diagnosticsResult.rows || [];
 
       // Process analytics
       const analytics = {
@@ -116,25 +111,16 @@ export class AnalyticsController {
   async getWorkspaceOverview(req: AuthRequest, res: Response) {
     try {
       const [pixelsResult, membersResult, integrationsResult] = await Promise.all([
-        supabase
-          .from('pixels')
-          .select('status')
-          .eq('workspace_id', req.user!.workspaceId),
+        Database.query('SELECT status FROM pixels WHERE workspace_id = $1', [req.user!.workspaceId]),
         
-        supabase
-          .from('workspace_members')
-          .select('role')
-          .eq('workspace_id', req.user!.workspaceId),
+        Database.query('SELECT role FROM workspace_members WHERE workspace_id = $1', [req.user!.workspaceId]),
         
-        supabase
-          .from('integrations')
-          .select('status')
-          .eq('workspace_id', req.user!.workspaceId)
+        Database.query('SELECT status FROM integrations WHERE workspace_id = $1', [req.user!.workspaceId])
       ]);
 
-      const pixels = pixelsResult.data || [];
-      const members = membersResult.data || [];
-      const integrations = integrationsResult.data || [];
+      const pixels = pixelsResult.rows || [];
+      const members = membersResult.rows || [];
+      const integrations = integrationsResult.rows || [];
 
       const overview = {
         pixels: {
@@ -192,25 +178,23 @@ export class AnalyticsController {
     }
 
     try {
-      let query = supabase
-        .from('events')
-        .select(`
-          event_name, timestamp, parameters, processed, error_message,
-          pixels!inner(workspace_id)
-        `)
-        .eq('pixels.workspace_id', req.user!.workspaceId)
-        .gte('timestamp', startDate.toISOString())
-        .lte('timestamp', endDate.toISOString());
+      let query = Database.query(`
+        SELECT event_name, timestamp, parameters, processed, error_message,
+        pixels.workspace_id, pixels.id AS pixel_id
+        FROM events
+        INNER JOIN pixels ON events.pixel_id = pixels.id
+        WHERE pixels.workspace_id = $1 AND timestamp >= $2 AND timestamp <= $3
+      `, [req.user!.workspaceId, startDate.toISOString(), endDate.toISOString()]);
 
       if (pixelId) {
-        query = query.eq('pixel_id', pixelId);
+        query = query.addParam(pixelId);
       }
 
       if (eventName) {
-        query = query.eq('event_name', eventName);
+        query = query.addParam(eventName);
       }
 
-      const { data: events, error } = await query;
+      const { rows: events, error } = await query;
 
       if (error) {
         logger.error('Error fetching events analytics:', error);
@@ -251,13 +235,13 @@ export class AnalyticsController {
     const { timeframe = '7d' } = req.query;
 
     try {
-      const { data: conversions, error } = await supabase
-        .from('conversions')
-        .select(`
-          *,
-          pixels!inner(workspace_id)
-        `)
-        .eq('pixels.workspace_id', req.user!.workspaceId);
+      const { rows: conversions, error } = await Database.query(`
+        SELECT *,
+        pixels.workspace_id, pixels.id AS pixel_id
+        FROM conversions
+        INNER JOIN pixels ON conversions.pixel_id = pixels.id
+        WHERE pixels.workspace_id = $1
+      `, [req.user!.workspaceId]);
 
       if (error) {
         logger.error('Error fetching conversions analytics:', error);
@@ -317,16 +301,13 @@ export class AnalyticsController {
     }
 
     try {
-      const { data: events, error } = await supabase
-        .from('events')
-        .select(`
-          event_name, timestamp, parameters,
-          pixels!inner(workspace_id)
-        `)
-        .eq('pixels.workspace_id', req.user!.workspaceId)
-        .eq('event_name', 'Purchase')
-        .gte('timestamp', startDate.toISOString())
-        .lte('timestamp', endDate.toISOString());
+      const { rows: events, error } = await Database.query(`
+        SELECT event_name, timestamp, parameters,
+        pixels.workspace_id, pixels.id AS pixel_id
+        FROM events
+        INNER JOIN pixels ON events.pixel_id = pixels.id
+        WHERE pixels.workspace_id = $1 AND event_name = $2 AND timestamp >= $3 AND timestamp <= $4
+      `, ['Purchase', req.user!.workspaceId, startDate.toISOString(), endDate.toISOString()]);
 
       if (error) {
         logger.error('Error fetching revenue analytics:', error);
@@ -392,21 +373,19 @@ export class AnalyticsController {
     }
 
     try {
-      let query = supabase
-        .from('events')
-        .select(`
-          event_name, timestamp,
-          pixels!inner(workspace_id)
-        `)
-        .eq('pixels.workspace_id', req.user!.workspaceId)
-        .gte('timestamp', startDate.toISOString())
-        .lte('timestamp', endDate.toISOString());
+      let query = Database.query(`
+        SELECT event_name, timestamp,
+        pixels.workspace_id, pixels.id AS pixel_id
+        FROM events
+        INNER JOIN pixels ON events.pixel_id = pixels.id
+        WHERE pixels.workspace_id = $1 AND timestamp >= $2 AND timestamp <= $3
+      `, [req.user!.workspaceId, startDate.toISOString(), endDate.toISOString()]);
 
       if (pixelId) {
-        query = query.eq('pixel_id', pixelId);
+        query = query.addParam(pixelId);
       }
 
-      const { data: events, error } = await query;
+      const { rows: events, error } = await query;
 
       if (error) {
         logger.error('Error fetching funnel analytics:', error);
@@ -466,16 +445,13 @@ export class AnalyticsController {
     const last15Minutes = new Date(Date.now() - 15 * 60 * 1000);
 
     try {
-      const { data: recentEvents, error } = await supabase
-        .from('events')
-        .select(`
-          event_name, timestamp, parameters,
-          pixels!inner(workspace_id, name)
-        `)
-        .eq('pixels.workspace_id', req.user!.workspaceId)
-        .gte('timestamp', last15Minutes.toISOString())
-        .order('timestamp', { ascending: false })
-        .limit(100);
+      const { rows: recentEvents, error } = await Database.query(`
+        SELECT event_name, timestamp, parameters,
+        pixels.workspace_id, pixels.name
+        FROM events
+        INNER JOIN pixels ON events.pixel_id = pixels.id
+        WHERE pixels.workspace_id = $1 AND timestamp >= $2 AND timestamp <= $3
+      `, [req.user!.workspaceId, last15Minutes.toISOString(), Date.now().toISOString()]);
 
       if (error) {
         logger.error('Error fetching realtime analytics:', error);
@@ -532,15 +508,12 @@ export class AnalyticsController {
       let data: any[] = [];
 
       if (type === 'events') {
-        const { data: events, error } = await supabase
-          .from('events')
-          .select(`
-            *, pixels!inner(name, workspace_id)
-          `)
-          .eq('pixels.workspace_id', req.user!.workspaceId)
-          .gte('timestamp', startDate.toISOString())
-          .lte('timestamp', endDate.toISOString())
-          .order('timestamp', { ascending: false });
+        const { rows: events, error } = await Database.query(`
+          SELECT *, pixels.name, pixels.workspace_id
+          FROM events
+          INNER JOIN pixels ON events.pixel_id = pixels.id
+          WHERE pixels.workspace_id = $1 AND timestamp >= $2 AND timestamp <= $3
+        `, [req.user!.workspaceId, startDate.toISOString(), endDate.toISOString()]);
 
         if (error) throw error;
         data = events || [];

@@ -1,5 +1,5 @@
 import { Request, Response } from 'express';
-import { supabase } from '../config/database';
+import { Database } from '../config/database';
 import { createError } from '../middleware/errorHandler';
 import { logger } from '../utils/logger';
 import { verifyHmacSignature } from '../utils/crypto';
@@ -13,11 +13,9 @@ export class WebhookController {
 
     try {
       // Verify pixel exists
-      const { data: pixel, error: pixelError } = await supabase
-        .from('pixels')
-        .select('id, workspace_id')
-        .eq('pixel_id', pixelId)
-        .single();
+      const { data: pixel, error: pixelError } = await Database.query('SELECT id, workspace_id FROM pixels WHERE pixel_id = $1', [pixelId])
+        .then(result => result.rows[0])
+        .catch(() => null);
 
       if (pixelError || !pixel) {
         throw createError('Pixel not found', 404);
@@ -66,12 +64,9 @@ export class WebhookController {
 
     try {
       // Verify integration exists
-      const { data: integration, error: integrationError } = await supabase
-        .from('integrations')
-        .select('*')
-        .eq('id', integrationId)
-        .eq('type', 'gtm')
-        .single();
+      const { data: integration, error: integrationError } = await Database.query('SELECT * FROM integrations WHERE id = $1 AND type = $2', [integrationId, 'gtm'])
+        .then(result => result.rows[0])
+        .catch(() => null);
 
       if (integrationError || !integration) {
         throw createError('Integration not found', 404);
@@ -94,12 +89,9 @@ export class WebhookController {
 
     try {
       // Verify integration exists
-      const { data: integration, error: integrationError } = await supabase
-        .from('integrations')
-        .select('*')
-        .eq('id', integrationId)
-        .eq('type', 'shopify')
-        .single();
+      const { data: integration, error: integrationError } = await Database.query('SELECT * FROM integrations WHERE id = $1 AND type = $2', [integrationId, 'shopify'])
+        .then(result => result.rows[0])
+        .catch(() => null);
 
       if (integrationError || !integration) {
         throw createError('Integration not found', 404);
@@ -136,12 +128,9 @@ export class WebhookController {
 
     try {
       // Verify integration exists
-      const { data: integration, error: integrationError } = await supabase
-        .from('integrations')
-        .select('*')
-        .eq('id', integrationId)
-        .eq('type', 'webhook')
-        .single();
+      const { data: integration, error: integrationError } = await Database.query('SELECT * FROM integrations WHERE id = $1 AND type = $2', [integrationId, 'webhook'])
+        .then(result => result.rows[0])
+        .catch(() => null);
 
       if (integrationError || !integration) {
         throw createError('Integration not found', 404);
@@ -191,9 +180,16 @@ export class WebhookController {
         processed: false
       };
 
-      await supabase
-        .from('events')
-        .insert(eventData);
+      await Database.query('INSERT INTO events (id, pixel_id, event_name, event_type, parameters, source, timestamp, processed) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)', [
+        eventData.id,
+        eventData.pixel_id,
+        eventData.event_name,
+        eventData.event_type,
+        eventData.parameters,
+        eventData.source,
+        eventData.timestamp,
+        eventData.processed
+      ]);
 
       logger.info(`Lead event created for pixel ${pixel.id}`);
     } catch (error) {
@@ -205,13 +201,11 @@ export class WebhookController {
     try {
       // Process GTM container data
       if (payload.type === 'container_version_published') {
-        await supabase
-          .from('integrations')
-          .update({
-            last_sync: new Date().toISOString(),
-            status: 'active'
-          })
-          .eq('id', integration.id);
+        await Database.query('UPDATE integrations SET last_sync = $1, status = $2 WHERE id = $3', [
+          new Date().toISOString(),
+          'active',
+          integration.id
+        ]);
 
         logger.info(`GTM container updated for integration ${integration.id}`);
       }
@@ -223,10 +217,9 @@ export class WebhookController {
   private async processShopifyData(integration: any, payload: any) {
     try {
       // Get connected pixels for this integration
-      const { data: pixels } = await supabase
-        .from('pixels')
-        .select('id')
-        .eq('workspace_id', integration.workspace_id);
+      const { data: pixels } = await Database.query('SELECT id FROM pixels WHERE workspace_id = $1', [integration.workspace_id])
+        .then(result => result.rows.map(row => row.id))
+        .catch(() => []);
 
       if (!pixels || pixels.length === 0) {
         return;
@@ -257,7 +250,7 @@ export class WebhookController {
   private async processShopifyOrder(pixel: any, orderData: any, eventName: string) {
     const eventData = {
       id: uuidv4(),
-      pixel_id: pixel.id,
+      pixel_id: pixel,
       event_name: eventName,
       event_type: 'standard',
       parameters: {
@@ -273,17 +266,24 @@ export class WebhookController {
       processed: false
     };
 
-    await supabase
-      .from('events')
-      .insert(eventData);
+    await Database.query('INSERT INTO events (id, pixel_id, event_name, event_type, parameters, source, timestamp, processed) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)', [
+      eventData.id,
+      eventData.pixel_id,
+      eventData.event_name,
+      eventData.event_type,
+      eventData.parameters,
+      eventData.source,
+      eventData.timestamp,
+      eventData.processed
+    ]);
 
-    logger.info(`Shopify ${eventName} event created for pixel ${pixel.id}`);
+    logger.info(`Shopify ${eventName} event created for pixel ${pixel}`);
   }
 
   private async processShopifyCart(pixel: any, cartData: any, eventName: string) {
     const eventData = {
       id: uuidv4(),
-      pixel_id: pixel.id,
+      pixel_id: pixel,
       event_name: eventName,
       event_type: 'standard',
       parameters: {
@@ -298,17 +298,24 @@ export class WebhookController {
       processed: false
     };
 
-    await supabase
-      .from('events')
-      .insert(eventData);
+    await Database.query('INSERT INTO events (id, pixel_id, event_name, event_type, parameters, source, timestamp, processed) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)', [
+      eventData.id,
+      eventData.pixel_id,
+      eventData.event_name,
+      eventData.event_type,
+      eventData.parameters,
+      eventData.source,
+      eventData.timestamp,
+      eventData.processed
+    ]);
 
-    logger.info(`Shopify ${eventName} event created for pixel ${pixel.id}`);
+    logger.info(`Shopify ${eventName} event created for pixel ${pixel}`);
   }
 
   private async processShopifyCheckout(pixel: any, checkoutData: any, eventName: string) {
     const eventData = {
       id: uuidv4(),
-      pixel_id: pixel.id,
+      pixel_id: pixel,
       event_name: eventName,
       event_type: 'standard',
       parameters: {
@@ -323,20 +330,26 @@ export class WebhookController {
       processed: false
     };
 
-    await supabase
-      .from('events')
-      .insert(eventData);
+    await Database.query('INSERT INTO events (id, pixel_id, event_name, event_type, parameters, source, timestamp, processed) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)', [
+      eventData.id,
+      eventData.pixel_id,
+      eventData.event_name,
+      eventData.event_type,
+      eventData.parameters,
+      eventData.source,
+      eventData.timestamp,
+      eventData.processed
+    ]);
 
-    logger.info(`Shopify ${eventName} event created for pixel ${pixel.id}`);
+    logger.info(`Shopify ${eventName} event created for pixel ${pixel}`);
   }
 
   private async processCustomWebhookData(integration: any, payload: any) {
     try {
       // Get connected pixels for this integration
-      const { data: pixels } = await supabase
-        .from('pixels')
-        .select('id')
-        .eq('workspace_id', integration.workspace_id);
+      const { data: pixels } = await Database.query('SELECT id FROM pixels WHERE workspace_id = $1', [integration.workspace_id])
+        .then(result => result.rows.map(row => row.id))
+        .catch(() => []);
 
       if (!pixels || pixels.length === 0) {
         return;
@@ -345,7 +358,7 @@ export class WebhookController {
       // Process custom webhook payload
       const eventData = {
         id: uuidv4(),
-        pixel_id: pixels[0].id,
+        pixel_id: pixels[0],
         event_name: payload.event_name || 'CustomEvent',
         event_type: 'custom',
         parameters: payload.parameters || payload,
@@ -354,11 +367,18 @@ export class WebhookController {
         processed: false
       };
 
-      await supabase
-        .from('events')
-        .insert(eventData);
+      await Database.query('INSERT INTO events (id, pixel_id, event_name, event_type, parameters, source, timestamp, processed) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)', [
+        eventData.id,
+        eventData.pixel_id,
+        eventData.event_name,
+        eventData.event_type,
+        eventData.parameters,
+        eventData.source,
+        eventData.timestamp,
+        eventData.processed
+      ]);
 
-      logger.info(`Custom webhook event created for pixel ${pixels[0].id}`);
+      logger.info(`Custom webhook event created for pixel ${pixels[0]}`);
     } catch (error) {
       logger.error('Error processing custom webhook data:', error);
     }

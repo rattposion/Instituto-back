@@ -1,5 +1,5 @@
 import { Response } from 'express';
-import { supabase } from '../config/database';
+import { Database } from '../config/database';
 import { AuthRequest } from '../middleware/auth';
 import { createError } from '../middleware/errorHandler';
 import { logger } from '../utils/logger';
@@ -22,15 +22,14 @@ export class EventController {
     
     const offset = (Number(page) - 1) * Number(limit);
 
-    let query = supabase
-      .from('events')
-      .select(`
-        *,
-        pixels!inner(id, name, workspace_id)
-      `, { count: 'exact' })
-      .eq('pixels.workspace_id', req.user!.workspaceId)
-      .range(offset, offset + Number(limit) - 1)
-      .order(sortBy as string, { ascending: sortOrder === 'asc' });
+    let query = Database.query(`
+      SELECT *
+      FROM events
+      JOIN pixels ON pixels.id = events.pixel_id
+      WHERE pixels.workspace_id = ${req.user!.workspaceId}
+      ORDER BY ${sortBy} ${sortOrder}
+      LIMIT ${limit} OFFSET ${offset}
+    `);
 
     if (search) {
       query = query.or(`event_name.ilike.%${search}%,source.ilike.%${search}%`);
@@ -82,15 +81,13 @@ export class EventController {
   async getEventById(req: AuthRequest, res: Response) {
     const { id } = req.params;
 
-    const { data: event, error } = await supabase
-      .from('events')
-      .select(`
-        *,
-        pixels!inner(id, name, workspace_id)
-      `)
-      .eq('id', id)
-      .eq('pixels.workspace_id', req.user!.workspaceId)
-      .single();
+    const { data: event, error } = await Database.query(`
+      SELECT *
+      FROM events
+      JOIN pixels ON pixels.id = events.pixel_id
+      WHERE events.id = ${id} AND pixels.workspace_id = ${req.user!.workspaceId}
+      LIMIT 1
+    `);
 
     if (error || !event) {
       throw createError('Event not found', 404);
@@ -106,12 +103,12 @@ export class EventController {
     const { pixelId, eventName, eventType, parameters, source, userAgent, ipAddress } = req.body;
 
     // Verify pixel belongs to workspace
-    const { data: pixel, error: pixelError } = await supabase
-      .from('pixels')
-      .select('id')
-      .eq('id', pixelId)
-      .eq('workspace_id', req.user!.workspaceId)
-      .single();
+    const { data: pixel, error: pixelError } = await Database.query(`
+      SELECT id
+      FROM pixels
+      WHERE id = ${pixelId} AND workspace_id = ${req.user!.workspaceId}
+      LIMIT 1
+    `);
 
     if (pixelError || !pixel) {
       throw createError('Pixel not found', 404);
@@ -130,11 +127,11 @@ export class EventController {
       processed: false
     };
 
-    const { data: event, error } = await supabase
-      .from('events')
-      .insert(eventData)
-      .select()
-      .single();
+    const { data: event, error } = await Database.query(`
+      INSERT INTO events (id, pixel_id, event_name, event_type, parameters, source, user_agent, ip_address, timestamp, processed)
+      VALUES (${eventData.id}, ${eventData.pixel_id}, ${eventData.event_name}, ${eventData.event_type}, ${eventData.parameters}, ${eventData.source}, ${eventData.user_agent}, ${eventData.ip_address}, ${eventData.timestamp}, ${eventData.processed})
+      RETURNING *
+    `);
 
     if (error) {
       logger.error('Error creating event:', error);
@@ -163,11 +160,11 @@ export class EventController {
 
     // Verify all pixels belong to workspace
     const pixelIds = [...new Set(events.map(e => e.pixelId))];
-    const { data: pixels, error: pixelError } = await supabase
-      .from('pixels')
-      .select('id')
-      .eq('workspace_id', req.user!.workspaceId)
-      .in('id', pixelIds);
+    const { data: pixels, error: pixelError } = await Database.query(`
+      SELECT id
+      FROM pixels
+      WHERE workspace_id = ${req.user!.workspaceId} AND id IN (${pixelIds.map(id => `'${id}'`).join(',')})
+    `);
 
     if (pixelError || pixels.length !== pixelIds.length) {
       throw createError('One or more pixels not found', 404);
@@ -186,10 +183,11 @@ export class EventController {
       processed: false
     }));
 
-    const { data: createdEvents, error } = await supabase
-      .from('events')
-      .insert(eventData)
-      .select();
+    const { data: createdEvents, error } = await Database.query(`
+      INSERT INTO events (id, pixel_id, event_name, event_type, parameters, source, user_agent, ip_address, timestamp, processed)
+      VALUES ${eventData.map(e => `(${e.id}, ${e.pixel_id}, ${e.event_name}, ${e.event_type}, ${e.parameters}, ${e.source}, ${e.user_agent}, ${e.ip_address}, ${e.timestamp}, ${e.processed})`).join(',')}
+      RETURNING *
+    `);
 
     if (error) {
       logger.error('Error creating bulk events:', error);
@@ -232,15 +230,14 @@ export class EventController {
         startDate.setDate(startDate.getDate() - 7);
     }
 
-    let query = supabase
-      .from('events')
-      .select(`
-        event_name, timestamp, processed, error_message, parameters,
-        pixels!inner(workspace_id)
-      `)
-      .eq('pixels.workspace_id', req.user!.workspaceId)
-      .gte('timestamp', startDate.toISOString())
-      .lte('timestamp', endDate.toISOString());
+    let query = Database.query(`
+      SELECT event_name, timestamp, processed, error_message, parameters,
+      pixels.workspace_id
+      FROM events
+      JOIN pixels ON pixels.id = events.pixel_id
+      WHERE pixels.workspace_id = ${req.user!.workspaceId}
+      AND timestamp >= ${startDate.toISOString()} AND timestamp <= ${endDate.toISOString()}
+    `);
 
     if (pixelId) {
       query = query.eq('pixel_id', pixelId);
@@ -264,15 +261,14 @@ export class EventController {
   async reprocessFailedEvents(req: AuthRequest, res: Response) {
     const { pixelId, limit = 100 } = req.body;
 
-    let query = supabase
-      .from('events')
-      .select(`
-        *,
-        pixels!inner(workspace_id)
-      `)
-      .eq('pixels.workspace_id', req.user!.workspaceId)
-      .not('error_message', 'is', null)
-      .limit(Number(limit));
+    let query = Database.query(`
+      SELECT *
+      FROM events
+      JOIN pixels ON pixels.id = events.pixel_id
+      WHERE pixels.workspace_id = ${req.user!.workspaceId}
+      AND error_message IS NOT NULL
+      LIMIT ${limit}
+    `);
 
     if (pixelId) {
       query = query.eq('pixel_id', pixelId);
@@ -337,20 +333,22 @@ export class EventController {
         await this.updatePixelStats(event.pixel_id, event);
       }
 
-      await supabase
-        .from('events')
-        .update(updateData)
-        .eq('id', event.id);
+      await Database.query(`
+        UPDATE events
+        SET processed = ${updateData.processed},
+            error_message = ${updateData.error_message},
+            updated_at = ${updateData.updated_at}
+        WHERE id = ${event.id}
+      `);
 
     } catch (error) {
-      await supabase
-        .from('events')
-        .update({
-          processed: false,
-          error_message: error.message,
-          updated_at: new Date().toISOString()
-        })
-        .eq('id', event.id);
+      await Database.query(`
+        UPDATE events
+        SET processed = false,
+            error_message = ${error.message},
+            updated_at = ${new Date().toISOString()}
+        WHERE id = ${event.id}
+      `);
       
       throw error;
     }
@@ -358,11 +356,12 @@ export class EventController {
 
   private async updatePixelStats(pixelId: string, event: any) {
     // Update pixel events count and revenue
-    const { data: pixel } = await supabase
-      .from('pixels')
-      .select('events_count, conversions_count, revenue')
-      .eq('id', pixelId)
-      .single();
+    const { data: pixel } = await Database.query(`
+      SELECT events_count, conversions_count, revenue
+      FROM pixels
+      WHERE id = ${pixelId}
+      LIMIT 1
+    `);
 
     if (pixel) {
       const updateData: any = {
@@ -375,10 +374,14 @@ export class EventController {
         updateData.revenue = pixel.revenue + parseFloat(event.parameters.value);
       }
 
-      await supabase
-        .from('pixels')
-        .update(updateData)
-        .eq('id', pixelId);
+      await Database.query(`
+        UPDATE pixels
+        SET events_count = ${updateData.events_count},
+            conversions_count = ${updateData.conversions_count},
+            revenue = ${updateData.revenue},
+            last_activity = ${updateData.last_activity}
+        WHERE id = ${pixelId}
+      `);
     }
   }
 

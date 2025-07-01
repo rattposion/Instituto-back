@@ -1,5 +1,5 @@
 import { Response } from 'express';
-import { supabase } from '../config/database';
+import { Database } from '../config/database';
 import { AuthRequest } from '../middleware/auth';
 import { createError } from '../middleware/errorHandler';
 import { logger } from '../utils/logger';
@@ -10,9 +10,9 @@ export class IntegrationController {
     const { page = 1, limit = 20, search, type, status, sortBy = 'created_at', sortOrder = 'desc' } = req.query;
     const offset = (Number(page) - 1) * Number(limit);
 
-    let query = supabase
-      .from('integrations')
+    let query = Database.query
       .select('*', { count: 'exact' })
+      .from('integrations')
       .eq('workspace_id', req.user!.workspaceId)
       .range(offset, offset + Number(limit) - 1)
       .order(sortBy as string, { ascending: sortOrder === 'asc' });
@@ -51,9 +51,9 @@ export class IntegrationController {
   async getIntegrationById(req: AuthRequest, res: Response) {
     const { id } = req.params;
 
-    const { data: integration, error } = await supabase
-      .from('integrations')
+    const { data: integration, error } = await Database.query
       .select('*')
+      .from('integrations')
       .eq('id', id)
       .eq('workspace_id', req.user!.workspaceId)
       .single();
@@ -88,9 +88,9 @@ export class IntegrationController {
       pixels_connected: 0
     };
 
-    const { data: integration, error } = await supabase
-      .from('integrations')
+    const { data: integration, error } = await Database.query
       .insert(integrationData)
+      .from('integrations')
       .select()
       .single();
 
@@ -110,9 +110,9 @@ export class IntegrationController {
     const { name, description, config, status } = req.body;
 
     // Check if integration exists and belongs to workspace
-    const { data: existingIntegration, error: fetchError } = await supabase
-      .from('integrations')
+    const { data: existingIntegration, error: fetchError } = await Database.query
       .select('*')
+      .from('integrations')
       .eq('id', id)
       .eq('workspace_id', req.user!.workspaceId)
       .single();
@@ -130,9 +130,9 @@ export class IntegrationController {
     if (config !== undefined) updateData.config = config;
     if (status !== undefined) updateData.status = status;
 
-    const { data: integration, error } = await supabase
-      .from('integrations')
+    const { data: integration, error } = await Database.query
       .update(updateData)
+      .from('integrations')
       .eq('id', id)
       .select()
       .single();
@@ -152,9 +152,9 @@ export class IntegrationController {
     const { id } = req.params;
 
     // Check if integration exists and belongs to workspace
-    const { data: existingIntegration, error: fetchError } = await supabase
-      .from('integrations')
+    const { data: existingIntegration, error: fetchError } = await Database.query
       .select('name')
+      .from('integrations')
       .eq('id', id)
       .eq('workspace_id', req.user!.workspaceId)
       .single();
@@ -163,9 +163,9 @@ export class IntegrationController {
       throw createError('Integration not found', 404);
     }
 
-    const { error } = await supabase
-      .from('integrations')
+    const { error } = await Database.query
       .delete()
+      .from('integrations')
       .eq('id', id);
 
     if (error) {
@@ -183,9 +183,9 @@ export class IntegrationController {
     const { id } = req.params;
 
     // Check if integration exists and belongs to workspace
-    const { data: integration, error: fetchError } = await supabase
-      .from('integrations')
+    const { data: integration, error: fetchError } = await Database.query
       .select('*')
+      .from('integrations')
       .eq('id', id)
       .eq('workspace_id', req.user!.workspaceId)
       .single();
@@ -198,12 +198,12 @@ export class IntegrationController {
     const testResult = await this.performIntegrationTest(integration);
 
     // Update integration status based on test result
-    await supabase
-      .from('integrations')
+    await Database.query
       .update({
         status: testResult.success ? 'active' : 'error',
         last_sync: new Date().toISOString()
       })
+      .from('integrations')
       .eq('id', id);
 
     res.json({
@@ -216,9 +216,9 @@ export class IntegrationController {
     const { id } = req.params;
 
     // Check if integration exists and belongs to workspace
-    const { data: integration, error: fetchError } = await supabase
-      .from('integrations')
+    const { data: integration, error: fetchError } = await Database.query
       .select('*')
+      .from('integrations')
       .eq('id', id)
       .eq('workspace_id', req.user!.workspaceId)
       .single();
@@ -231,13 +231,13 @@ export class IntegrationController {
     const syncResult = await this.performIntegrationSync(integration);
 
     // Update integration with sync results
-    await supabase
-      .from('integrations')
+    await Database.query
       .update({
         status: syncResult.success ? 'active' : 'error',
         last_sync: new Date().toISOString(),
         pixels_connected: syncResult.pixelsConnected || integration.pixels_connected
       })
+      .from('integrations')
       .eq('id', id);
 
     res.json({

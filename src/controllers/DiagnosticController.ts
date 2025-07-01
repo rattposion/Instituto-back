@@ -1,5 +1,5 @@
 import { Response } from 'express';
-import { supabase } from '../config/database';
+import { Database } from '../config/database';
 import { AuthRequest } from '../middleware/auth';
 import { createError } from '../middleware/errorHandler';
 import { logger } from '../utils/logger';
@@ -21,15 +21,19 @@ export class DiagnosticController {
     
     const offset = (Number(page) - 1) * Number(limit);
 
-    let query = supabase
-      .from('diagnostics')
-      .select(`
+    let query = Database.query(`
+      SELECT
         *,
         pixels!inner(id, name, workspace_id)
-      `, { count: 'exact' })
-      .eq('pixels.workspace_id', req.user!.workspaceId)
-      .range(offset, offset + Number(limit) - 1)
-      .order(sortBy as string, { ascending: sortOrder === 'asc' });
+      FROM
+        diagnostics
+      WHERE
+        pixels.workspace_id = ${req.user!.workspaceId}
+      ORDER BY
+        ${sortBy} ${sortOrder === 'asc' ? 'ASC' : 'DESC'}
+      LIMIT
+        ${limit} OFFSET ${offset}
+    `);
 
     if (search) {
       query = query.or(`title.ilike.%${search}%,description.ilike.%${search}%`);
@@ -73,15 +77,17 @@ export class DiagnosticController {
   async getDiagnosticById(req: AuthRequest, res: Response) {
     const { id } = req.params;
 
-    const { data: diagnostic, error } = await supabase
-      .from('diagnostics')
-      .select(`
+    const { data: diagnostic, error } = await Database.query(`
+      SELECT
         *,
         pixels!inner(id, name, workspace_id)
-      `)
-      .eq('id', id)
-      .eq('pixels.workspace_id', req.user!.workspaceId)
-      .single();
+      FROM
+        diagnostics
+      WHERE
+        id = ${id} AND pixels.workspace_id = ${req.user!.workspaceId}
+      LIMIT
+        1
+    `);
 
     if (error || !diagnostic) {
       throw createError('Diagnostic not found', 404);
@@ -97,12 +103,9 @@ export class DiagnosticController {
     const { pixelId } = req.params;
 
     // Verify pixel belongs to workspace
-    const { data: pixel, error: pixelError } = await supabase
-      .from('pixels')
-      .select('*')
-      .eq('id', pixelId)
-      .eq('workspace_id', req.user!.workspaceId)
-      .single();
+    const { data: pixel, error: pixelError } = await Database.query(`
+      SELECT * FROM pixels WHERE id = ${pixelId} AND workspace_id = ${req.user!.workspaceId} LIMIT 1
+    `);
 
     if (pixelError || !pixel) {
       throw createError('Pixel not found', 404);
@@ -114,22 +117,19 @@ export class DiagnosticController {
     // Save diagnostic results
     const savedDiagnostics = [];
     for (const result of diagnosticResults) {
-      const { data: diagnostic, error } = await supabase
-        .from('diagnostics')
-        .upsert({
-          pixel_id: pixelId,
-          severity: result.severity,
-          category: result.category,
-          title: result.title,
-          description: result.description,
-          url: result.url,
-          status: 'active',
-          last_checked: new Date().toISOString()
-        }, {
-          onConflict: 'pixel_id,title'
-        })
-        .select()
-        .single();
+      const { data: diagnostic, error } = await Database.query(`
+        INSERT INTO diagnostics (pixel_id, severity, category, title, description, url, status, last_checked)
+        VALUES (${pixelId}, ${result.severity}, ${result.category}, ${result.title}, ${result.description}, ${result.url}, 'active', ${new Date().toISOString()})
+        ON CONFLICT (pixel_id, title) DO UPDATE SET
+          severity = EXCLUDED.severity,
+          category = EXCLUDED.category,
+          title = EXCLUDED.title,
+          description = EXCLUDED.description,
+          url = EXCLUDED.url,
+          status = EXCLUDED.status,
+          last_checked = EXCLUDED.last_checked
+        RETURNING *
+      `);
 
       if (!error && diagnostic) {
         savedDiagnostics.push(diagnostic);
@@ -151,29 +151,32 @@ export class DiagnosticController {
     const { id } = req.params;
 
     // Check if diagnostic exists and belongs to workspace
-    const { data: existingDiagnostic, error: fetchError } = await supabase
-      .from('diagnostics')
-      .select(`
+    const { data: existingDiagnostic, error: fetchError } = await Database.query(`
+      SELECT
         *,
         pixels!inner(workspace_id)
-      `)
-      .eq('id', id)
-      .eq('pixels.workspace_id', req.user!.workspaceId)
-      .single();
+      FROM
+        diagnostics
+      WHERE
+        id = ${id} AND pixels.workspace_id = ${req.user!.workspaceId}
+      LIMIT
+        1
+    `);
 
     if (fetchError || !existingDiagnostic) {
       throw createError('Diagnostic not found', 404);
     }
 
-    const { data: diagnostic, error } = await supabase
-      .from('diagnostics')
-      .update({
-        status: 'resolved',
-        last_checked: new Date().toISOString()
-      })
-      .eq('id', id)
-      .select()
-      .single();
+    const { data: diagnostic, error } = await Database.query(`
+      UPDATE
+        diagnostics
+      SET
+        status = 'resolved',
+        last_checked = ${new Date().toISOString()}
+      WHERE
+        id = ${id}
+      RETURNING *
+    `);
 
     if (error) {
       logger.error('Error resolving diagnostic:', error);
@@ -187,13 +190,15 @@ export class DiagnosticController {
   }
 
   async getDiagnosticsSummary(req: AuthRequest, res: Response) {
-    const { data: diagnostics, error } = await supabase
-      .from('diagnostics')
-      .select(`
+    const { data: diagnostics, error } = await Database.query(`
+      SELECT
         severity, category, status,
         pixels!inner(workspace_id)
-      `)
-      .eq('pixels.workspace_id', req.user!.workspaceId);
+      FROM
+        diagnostics
+      WHERE
+        pixels.workspace_id = ${req.user!.workspaceId}
+    `);
 
     if (error) {
       logger.error('Error fetching diagnostics summary:', error);
@@ -235,14 +240,17 @@ export class DiagnosticController {
   async exportDiagnosticsReport(req: AuthRequest, res: Response) {
     const { format = 'json', pixelId, severity, status } = req.query;
 
-    let query = supabase
-      .from('diagnostics')
-      .select(`
+    let query = Database.query(`
+      SELECT
         *,
         pixels!inner(id, name, workspace_id)
-      `)
-      .eq('pixels.workspace_id', req.user!.workspaceId)
-      .order('created_at', { ascending: false });
+      FROM
+        diagnostics
+      WHERE
+        pixels.workspace_id = ${req.user!.workspaceId}
+      ORDER BY
+        created_at DESC
+    `);
 
     if (pixelId) {
       query = query.eq('pixel_id', pixelId);
@@ -287,12 +295,9 @@ export class DiagnosticController {
     const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
 
     // Check 1: Recent events
-    const { data: recentEvents } = await supabase
-      .from('events')
-      .select('id')
-      .eq('pixel_id', pixel.id)
-      .gte('timestamp', oneHourAgo.toISOString())
-      .limit(1);
+    const { data: recentEvents } = await Database.query(`
+      SELECT id FROM events WHERE pixel_id = ${pixel.id} AND timestamp >= ${oneHourAgo.toISOString()} LIMIT 1
+    `);
 
     if (!recentEvents || recentEvents.length === 0) {
       results.push({
@@ -305,11 +310,9 @@ export class DiagnosticController {
     }
 
     // Check 2: Error rate
-    const { data: allEvents } = await supabase
-      .from('events')
-      .select('id, error_message')
-      .eq('pixel_id', pixel.id)
-      .gte('timestamp', oneDayAgo.toISOString());
+    const { data: allEvents } = await Database.query(`
+      SELECT id, error_message FROM events WHERE pixel_id = ${pixel.id} AND timestamp >= ${oneDayAgo.toISOString()}
+    `);
 
     if (allEvents && allEvents.length > 0) {
       const errorEvents = allEvents.filter(e => e.error_message);

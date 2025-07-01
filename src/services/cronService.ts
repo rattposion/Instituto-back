@@ -1,5 +1,5 @@
 import cron from 'node-cron';
-import { supabase } from '../config/database';
+import { Database } from '../config/database';
 import { logger } from '../utils/logger';
 
 export function startCronJobs() {
@@ -33,10 +33,7 @@ export function startCronJobs() {
 async function runPixelDiagnostics() {
   try {
     // Get all active pixels
-    const { data: pixels, error } = await supabase
-      .from('pixels')
-      .select('*')
-      .eq('status', 'active');
+    const { data: pixels, error } = await Database.query('SELECT * FROM pixels WHERE status = $1', ['active']);
 
     if (error) {
       logger.error('Error fetching pixels for diagnostics:', error);
@@ -56,12 +53,7 @@ async function checkPixelHealth(pixel: any) {
   const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
 
   // Check for recent events
-  const { data: recentEvents, error } = await supabase
-    .from('events')
-    .select('id')
-    .eq('pixel_id', pixel.id)
-    .gte('timestamp', oneHourAgo.toISOString())
-    .limit(1);
+  const { data: recentEvents, error } = await Database.query('SELECT id FROM events WHERE pixel_id = $1 AND timestamp >= $2 AND timestamp < $3 LIMIT 1', [pixel.id, oneHourAgo.toISOString(), now.toISOString()]);
 
   if (error) {
     logger.error(`Error checking events for pixel ${pixel.id}:`, error);
@@ -70,32 +62,13 @@ async function checkPixelHealth(pixel: any) {
 
   // Create diagnostic if no recent events
   if (!recentEvents || recentEvents.length === 0) {
-    await supabase
-      .from('diagnostics')
-      .upsert({
-        pixel_id: pixel.id,
-        severity: 'warning',
-        category: 'performance',
-        title: 'Low event volume',
-        description: 'No events received in the last hour',
-        status: 'active',
-        last_checked: now.toISOString()
-      }, {
-        onConflict: 'pixel_id,title'
-      });
+    await Database.query('INSERT INTO diagnostics (pixel_id, severity, category, title, description, status, last_checked) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (pixel_id, title) DO UPDATE SET severity = $2, category = $3, title = $4, description = $5, status = $6, last_checked = $7', [pixel.id, 'warning', 'performance', 'Low event volume', 'No events received in the last hour', 'active', now.toISOString()]);
 
     // Update pixel status
-    await supabase
-      .from('pixels')
-      .update({ status: 'inactive' })
-      .eq('id', pixel.id);
+    await Database.query('UPDATE pixels SET status = $1 WHERE id = $2', ['inactive', pixel.id]);
   } else {
     // Resolve diagnostic if exists
-    await supabase
-      .from('diagnostics')
-      .update({ status: 'resolved' })
-      .eq('pixel_id', pixel.id)
-      .eq('title', 'Low event volume');
+    await Database.query('UPDATE diagnostics SET status = $1 WHERE pixel_id = $2 AND title = $3', ['resolved', pixel.id, 'Low event volume']);
   }
 }
 
@@ -105,10 +78,7 @@ async function cleanupOldEvents() {
     const cutoffDate = new Date();
     cutoffDate.setDate(cutoffDate.getDate() - retentionDays);
 
-    const { error } = await supabase
-      .from('events')
-      .delete()
-      .lt('timestamp', cutoffDate.toISOString());
+    const { error } = await Database.query('DELETE FROM events WHERE timestamp < $1', [cutoffDate.toISOString()]);
 
     if (error) {
       logger.error('Error cleaning up old events:', error);
@@ -123,9 +93,7 @@ async function cleanupOldEvents() {
 async function updatePixelStatistics() {
   try {
     // Get all pixels
-    const { data: pixels, error } = await supabase
-      .from('pixels')
-      .select('id');
+    const { data: pixels, error } = await Database.query('SELECT id FROM pixels');
 
     if (error) {
       logger.error('Error fetching pixels for stats update:', error);
@@ -145,11 +113,7 @@ async function updatePixelStats(pixelId: string) {
   last24Hours.setDate(last24Hours.getDate() - 1);
 
   // Get events count and revenue for last 24 hours
-  const { data: events, error } = await supabase
-    .from('events')
-    .select('event_name, parameters')
-    .eq('pixel_id', pixelId)
-    .gte('timestamp', last24Hours.toISOString());
+  const { data: events, error } = await Database.query('SELECT event_name, parameters FROM events WHERE pixel_id = $1 AND timestamp >= $2 AND timestamp < $3', [pixelId, last24Hours.toISOString(), new Date().toISOString()]);
 
   if (error) {
     logger.error(`Error fetching events for pixel ${pixelId}:`, error);
@@ -167,15 +131,7 @@ async function updatePixelStats(pixelId: string) {
   });
 
   // Update pixel statistics
-  await supabase
-    .from('pixels')
-    .update({
-      events_count: events.length,
-      conversions_count: conversions,
-      revenue: revenue,
-      last_activity: events.length > 0 ? new Date().toISOString() : null
-    })
-    .eq('id', pixelId);
+  await Database.query('UPDATE pixels SET events_count = $1, conversions_count = $2, revenue = $3, last_activity = $4 WHERE id = $5', [events.length, conversions, revenue, events.length > 0 ? new Date().toISOString() : null, pixelId]);
 }
 
 async function processFailedEvents() {
@@ -184,12 +140,7 @@ async function processFailedEvents() {
     const oneHourAgo = new Date();
     oneHourAgo.setHours(oneHourAgo.getHours() - 1);
 
-    const { data: failedEvents, error } = await supabase
-      .from('events')
-      .select('*')
-      .not('error_message', 'is', null)
-      .gte('created_at', oneHourAgo.toISOString())
-      .limit(100);
+    const { data: failedEvents, error } = await Database.query('SELECT * FROM events WHERE error_message IS NOT NULL AND created_at >= $1 AND created_at < $2 LIMIT 100', [oneHourAgo.toISOString(), new Date().toISOString()]);
 
     if (error) {
       logger.error('Error fetching failed events:', error);
@@ -203,14 +154,7 @@ async function processFailedEvents() {
         const success = Math.random() > 0.3; // 70% success rate on retry
         
         if (success) {
-          await supabase
-            .from('events')
-            .update({
-              processed: true,
-              error_message: null,
-              updated_at: new Date().toISOString()
-            })
-            .eq('id', event.id);
+          await Database.query('UPDATE events SET processed = $1, error_message = $2, updated_at = $3 WHERE id = $4', [true, null, new Date().toISOString(), event.id]);
           
           reprocessedCount++;
         }

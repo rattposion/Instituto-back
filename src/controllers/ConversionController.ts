@@ -1,5 +1,5 @@
 import { Response } from 'express';
-import { supabase } from '../config/database';
+import { Database } from '../config/database';
 import { AuthRequest } from '../middleware/auth';
 import { createError } from '../middleware/errorHandler';
 import { logger } from '../utils/logger';
@@ -10,15 +10,21 @@ export class ConversionController {
     const { page = 1, limit = 20, search, pixelId, isActive, sortBy = 'created_at', sortOrder = 'desc' } = req.query;
     const offset = (Number(page) - 1) * Number(limit);
 
-    let query = supabase
-      .from('conversions')
-      .select(`
+    let query = Database.query(`
+      SELECT
         *,
         pixels!inner(id, name, workspace_id)
-      `, { count: 'exact' })
-      .eq('pixels.workspace_id', req.user!.workspaceId)
-      .range(offset, offset + Number(limit) - 1)
-      .order(sortBy as string, { ascending: sortOrder === 'asc' });
+      FROM
+        conversions
+      WHERE
+        pixels.workspace_id = ${req.user!.workspaceId}
+      ORDER BY
+        ${sortBy} ${sortOrder === 'asc' ? 'ASC' : 'DESC'}
+      LIMIT
+        ${limit}
+      OFFSET
+        ${offset}
+    `);
 
     if (search) {
       query = query.ilike('name', `%${search}%`);
@@ -54,15 +60,18 @@ export class ConversionController {
   async getConversionById(req: AuthRequest, res: Response) {
     const { id } = req.params;
 
-    const { data: conversion, error } = await supabase
-      .from('conversions')
-      .select(`
+    const { data: conversion, error } = await Database.query(`
+      SELECT
         *,
         pixels!inner(id, name, workspace_id)
-      `)
-      .eq('id', id)
-      .eq('pixels.workspace_id', req.user!.workspaceId)
-      .single();
+      FROM
+        conversions
+      WHERE
+        id = ${id}
+        AND pixels.workspace_id = ${req.user!.workspaceId}
+      LIMIT
+        1
+    `);
 
     if (error || !conversion) {
       throw createError('Conversion not found', 404);
@@ -78,12 +87,17 @@ export class ConversionController {
     const { name, pixelId, eventName, rules } = req.body;
 
     // Verify pixel belongs to workspace
-    const { data: pixel, error: pixelError } = await supabase
-      .from('pixels')
-      .select('id')
-      .eq('id', pixelId)
-      .eq('workspace_id', req.user!.workspaceId)
-      .single();
+    const { data: pixel, error: pixelError } = await Database.query(`
+      SELECT
+        id
+      FROM
+        pixels
+      WHERE
+        id = ${pixelId}
+        AND workspace_id = ${req.user!.workspaceId}
+      LIMIT
+        1
+    `);
 
     if (pixelError || !pixel) {
       throw createError('Pixel not found', 404);
@@ -102,11 +116,13 @@ export class ConversionController {
       is_active: true
     };
 
-    const { data: conversion, error } = await supabase
-      .from('conversions')
-      .insert(conversionData)
-      .select()
-      .single();
+    const { data: conversion, error } = await Database.query(`
+      INSERT INTO
+        conversions (id, name, pixel_id, event_name, rules, conversion_rate, total_conversions, total_value, average_value, is_active)
+      VALUES
+        (${conversionData.id}, ${name}, ${pixelId}, ${eventName}, ${rules}, ${conversionData.conversion_rate}, ${conversionData.total_conversions}, ${conversionData.total_value}, ${conversionData.average_value}, ${conversionData.is_active})
+      RETURNING *
+    `);
 
     if (error) {
       logger.error('Error creating conversion:', error);
@@ -124,15 +140,18 @@ export class ConversionController {
     const { name, eventName, rules, isActive } = req.body;
 
     // Check if conversion exists and belongs to workspace
-    const { data: existingConversion, error: fetchError } = await supabase
-      .from('conversions')
-      .select(`
+    const { data: existingConversion, error: fetchError } = await Database.query(`
+      SELECT
         *,
         pixels!inner(workspace_id)
-      `)
-      .eq('id', id)
-      .eq('pixels.workspace_id', req.user!.workspaceId)
-      .single();
+      FROM
+        conversions
+      WHERE
+        id = ${id}
+        AND pixels.workspace_id = ${req.user!.workspaceId}
+      LIMIT
+        1
+    `);
 
     if (fetchError || !existingConversion) {
       throw createError('Conversion not found', 404);
@@ -147,12 +166,19 @@ export class ConversionController {
     if (rules !== undefined) updateData.rules = rules;
     if (isActive !== undefined) updateData.is_active = isActive;
 
-    const { data: conversion, error } = await supabase
-      .from('conversions')
-      .update(updateData)
-      .eq('id', id)
-      .select()
-      .single();
+    const { data: conversion, error } = await Database.query(`
+      UPDATE
+        conversions
+      SET
+        name = ${name},
+        event_name = ${eventName},
+        rules = ${rules},
+        is_active = ${isActive},
+        updated_at = ${updateData.updated_at}
+      WHERE
+        id = ${id}
+      RETURNING *
+    `);
 
     if (error) {
       logger.error('Error updating conversion:', error);
@@ -169,24 +195,29 @@ export class ConversionController {
     const { id } = req.params;
 
     // Check if conversion exists and belongs to workspace
-    const { data: existingConversion, error: fetchError } = await supabase
-      .from('conversions')
-      .select(`
+    const { data: existingConversion, error: fetchError } = await Database.query(`
+      SELECT
         name,
         pixels!inner(workspace_id)
-      `)
-      .eq('id', id)
-      .eq('pixels.workspace_id', req.user!.workspaceId)
-      .single();
+      FROM
+        conversions
+      WHERE
+        id = ${id}
+        AND pixels.workspace_id = ${req.user!.workspaceId}
+      LIMIT
+        1
+    `);
 
     if (fetchError || !existingConversion) {
       throw createError('Conversion not found', 404);
     }
 
-    const { error } = await supabase
-      .from('conversions')
-      .delete()
-      .eq('id', id);
+    const { error } = await Database.query(`
+      DELETE FROM
+        conversions
+      WHERE
+        id = ${id}
+    `);
 
     if (error) {
       logger.error('Error deleting conversion:', error);
@@ -204,15 +235,18 @@ export class ConversionController {
     const { timeframe = '7d' } = req.query;
 
     // Check if conversion exists and belongs to workspace
-    const { data: conversion, error: conversionError } = await supabase
-      .from('conversions')
-      .select(`
+    const { data: conversion, error: conversionError } = await Database.query(`
+      SELECT
         *,
         pixels!inner(workspace_id)
-      `)
-      .eq('id', id)
-      .eq('pixels.workspace_id', req.user!.workspaceId)
-      .single();
+      FROM
+        conversions
+      WHERE
+        id = ${id}
+        AND pixels.workspace_id = ${req.user!.workspaceId}
+      LIMIT
+        1
+    `);
 
     if (conversionError || !conversion) {
       throw createError('Conversion not found', 404);
@@ -237,14 +271,20 @@ export class ConversionController {
     }
 
     // Get conversion events
-    const { data: events, error: eventsError } = await supabase
-      .from('events')
-      .select('timestamp, parameters')
-      .eq('pixel_id', conversion.pixel_id)
-      .eq('event_name', conversion.event_name)
-      .gte('timestamp', startDate.toISOString())
-      .lte('timestamp', endDate.toISOString())
-      .order('timestamp', { ascending: true });
+    const { data: events, error: eventsError } = await Database.query(`
+      SELECT
+        timestamp,
+        parameters
+      FROM
+        events
+      WHERE
+        pixel_id = ${conversion.pixel_id}
+        AND event_name = ${conversion.event_name}
+        AND timestamp >= ${startDate.toISOString()}
+        AND timestamp <= ${endDate.toISOString()}
+      ORDER BY
+        timestamp ASC
+    `);
 
     if (eventsError) {
       logger.error('Error fetching conversion events:', eventsError);
@@ -265,15 +305,18 @@ export class ConversionController {
     const { timeframe = '7d' } = req.query;
 
     // Check if conversion exists and belongs to workspace
-    const { data: conversion, error: conversionError } = await supabase
-      .from('conversions')
-      .select(`
+    const { data: conversion, error: conversionError } = await Database.query(`
+      SELECT
         *,
         pixels!inner(workspace_id)
-      `)
-      .eq('id', id)
-      .eq('pixels.workspace_id', req.user!.workspaceId)
-      .single();
+      FROM
+        conversions
+      WHERE
+        id = ${id}
+        AND pixels.workspace_id = ${req.user!.workspaceId}
+      LIMIT
+        1
+    `);
 
     if (conversionError || !conversion) {
       throw createError('Conversion not found', 404);
@@ -298,13 +341,20 @@ export class ConversionController {
     }
 
     // Get all events for funnel analysis
-    const { data: events, error: eventsError } = await supabase
-      .from('events')
-      .select('event_name, timestamp, parameters')
-      .eq('pixel_id', conversion.pixel_id)
-      .gte('timestamp', startDate.toISOString())
-      .lte('timestamp', endDate.toISOString())
-      .order('timestamp', { ascending: true });
+    const { data: events, error: eventsError } = await Database.query(`
+      SELECT
+        event_name,
+        timestamp,
+        parameters
+      FROM
+        events
+      WHERE
+        pixel_id = ${conversion.pixel_id}
+        AND timestamp >= ${startDate.toISOString()}
+        AND timestamp <= ${endDate.toISOString()}
+      ORDER BY
+        timestamp ASC
+    `);
 
     if (eventsError) {
       logger.error('Error fetching funnel events:', eventsError);

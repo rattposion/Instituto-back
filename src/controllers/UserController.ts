@@ -1,5 +1,5 @@
 import { Response } from 'express';
-import { supabase } from '../config/database';
+import { Database } from '../config/database';
 import { AuthRequest } from '../middleware/auth';
 import { createError } from '../middleware/errorHandler';
 import { logger } from '../utils/logger';
@@ -9,8 +9,7 @@ export class UserController {
     const { page = 1, limit = 20, search, role, sortBy = 'created_at', sortOrder = 'desc' } = req.query;
     const offset = (Number(page) - 1) * Number(limit);
 
-    let query = supabase
-      .from('users')
+    let query = Database.query
       .select('id, name, email, role, avatar, is_active, last_login, created_at', { count: 'exact' })
       .eq('workspace_id', req.user!.workspaceId)
       .range(offset, offset + Number(limit) - 1)
@@ -46,8 +45,7 @@ export class UserController {
   async getUserById(req: AuthRequest, res: Response) {
     const { id } = req.params;
 
-    const { data: user, error } = await supabase
-      .from('users')
+    const { data: user, error } = await Database.query
       .select('id, name, email, role, avatar, is_active, last_login, created_at')
       .eq('id', id)
       .eq('workspace_id', req.user!.workspaceId)
@@ -68,8 +66,7 @@ export class UserController {
     const { name, role, isActive } = req.body;
 
     // Check if user exists and belongs to workspace
-    const { data: existingUser, error: fetchError } = await supabase
-      .from('users')
+    const { data: existingUser, error: fetchError } = await Database.query
       .select('*')
       .eq('id', id)
       .eq('workspace_id', req.user!.workspaceId)
@@ -92,8 +89,7 @@ export class UserController {
     if (role !== undefined) updateData.role = role;
     if (isActive !== undefined) updateData.is_active = isActive;
 
-    const { data: user, error } = await supabase
-      .from('users')
+    const { data: user, error } = await Database.query
       .update(updateData)
       .eq('id', id)
       .select('id, name, email, role, avatar, is_active, last_login, created_at')
@@ -106,8 +102,7 @@ export class UserController {
 
     // Update workspace member role if changed
     if (role !== undefined) {
-      await supabase
-        .from('workspace_members')
+      await Database.query
         .update({ role })
         .eq('user_id', id)
         .eq('workspace_id', req.user!.workspaceId);
@@ -128,8 +123,7 @@ export class UserController {
     }
 
     // Check if user exists and belongs to workspace
-    const { data: existingUser, error: fetchError } = await supabase
-      .from('users')
+    const { data: existingUser, error: fetchError } = await Database.query
       .select('name')
       .eq('id', id)
       .eq('workspace_id', req.user!.workspaceId)
@@ -140,15 +134,13 @@ export class UserController {
     }
 
     // Remove from workspace members
-    await supabase
-      .from('workspace_members')
+    await Database.query
       .delete()
       .eq('user_id', id)
       .eq('workspace_id', req.user!.workspaceId);
 
     // Deactivate user instead of deleting
-    const { error } = await supabase
-      .from('users')
+    const { error } = await Database.query
       .update({ 
         is_active: false,
         updated_at: new Date().toISOString()
@@ -172,8 +164,7 @@ export class UserController {
     const offset = (Number(page) - 1) * Number(limit);
 
     // Check if user exists and belongs to workspace
-    const { data: user, error: userError } = await supabase
-      .from('users')
+    const { data: user, error: userError } = await Database.query
       .select('id')
       .eq('id', id)
       .eq('workspace_id', req.user!.workspaceId)
@@ -183,8 +174,7 @@ export class UserController {
       throw createError('User not found', 404);
     }
 
-    const { data: activities, error, count } = await supabase
-      .from('audit_logs')
+    const { data: activities, error, count } = await Database.query
       .select('*', { count: 'exact' })
       .eq('user_id', id)
       .eq('workspace_id', req.user!.workspaceId)
