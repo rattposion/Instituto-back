@@ -9,87 +9,101 @@ import { v4 as uuidv4 } from 'uuid';
 
 export class AuthController {
   async register(req: Request, res: Response) {
-    const { name, email, password, workspaceName } = req.body;
+    logger.info('Iniciando registro de usuário', { body: { ...req.body, password: '***' } });
+    try {
+      const { name, email, password, workspaceName } = req.body;
 
-    // Check if user already exists
-    const existingUserResult = await Database.query(
-      'SELECT id FROM users WHERE email = $1',
-      [email]
-    );
-
-    if (existingUserResult.rows.length > 0) {
-      throw createError('User already exists', 409);
-    }
-
-    // Hash password
-    const passwordHash = await hashPassword(password);
-
-    // Create workspace and user in transaction
-    const result = await Database.transaction(async (client) => {
-      // Create workspace first
-      const workspaceId = uuidv4();
-      await client.query(
-        `INSERT INTO workspaces (id, name, slug, settings, is_active) 
-         VALUES ($1, $2, $3, $4, $5)`,
-        [
-          workspaceId,
-          workspaceName || `${name}'s Workspace`,
-          (workspaceName || `${name}-workspace`).toLowerCase().replace(/\s+/g, '-'),
-          JSON.stringify({}),
-          true
-        ]
+      // Check if user already exists
+      const existingUserResult = await Database.query(
+        'SELECT id FROM users WHERE email = $1',
+        [email]
       );
+      logger.info('Verificação de usuário existente', { email, existe: existingUserResult.rows.length > 0 });
 
-      // Create user
-      const userId = uuidv4();
-      await client.query(
-        `INSERT INTO users (id, name, email, password_hash, role, workspace_id, is_active) 
-         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-        [userId, name, email, passwordHash, 'admin', workspaceId, true]
-      );
-
-      // Update workspace owner
-      await client.query(
-        'UPDATE workspaces SET owner_id = $1 WHERE id = $2',
-        [userId, workspaceId]
-      );
-
-      // Create workspace member record
-      await client.query(
-        `INSERT INTO workspace_members (id, workspace_id, user_id, role, invited_by, joined_at) 
-         VALUES ($1, $2, $3, $4, $5, $6)`,
-        [uuidv4(), workspaceId, userId, 'admin', userId, new Date()]
-      );
-
-      return { userId, workspaceId };
-    });
-
-    // Generate token
-    const token = generateToken({
-      userId: result.userId,
-      workspaceId: result.workspaceId,
-      role: 'admin'
-    });
-
-    // Log audit event
-    await this.logAuditEvent(result.workspaceId, result.userId, 'user.register', 'user', result.userId, {
-      email,
-      name
-    }, req);
-
-    res.status(201).json({
-      success: true,
-      data: {
-        token,
-        user: {
-          id: result.userId,
-          name,
-          email,
-          role: 'admin',
-          workspaceId: result.workspaceId
-        }
+      if (existingUserResult.rows.length > 0) {
+        throw createError('User already exists', 409);
       }
-    });
+
+      // Hash password
+      const passwordHash = await hashPassword(password);
+      logger.info('Senha hasheada com sucesso');
+
+      // Create workspace and user in transaction
+      const result = await Database.transaction(async (client) => {
+        // Create workspace first
+        const workspaceId = uuidv4();
+        await client.query(
+          `INSERT INTO workspaces (id, name, slug, settings, is_active) 
+           VALUES ($1, $2, $3, $4, $5)`,
+          [
+            workspaceId,
+            workspaceName || `${name}'s Workspace`,
+            (workspaceName || `${name}-workspace`).toLowerCase().replace(/\s+/g, '-'),
+            JSON.stringify({}),
+            true
+          ]
+        );
+        logger.info('Workspace criado', { workspaceId });
+
+        // Create user
+        const userId = uuidv4();
+        await client.query(
+          `INSERT INTO users (id, name, email, password_hash, role, workspace_id, is_active) 
+           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          [userId, name, email, passwordHash, 'admin', workspaceId, true]
+        );
+        logger.info('Usuário criado', { userId });
+
+        // Update workspace owner
+        await client.query(
+          'UPDATE workspaces SET owner_id = $1 WHERE id = $2',
+          [userId, workspaceId]
+        );
+        logger.info('Owner do workspace atualizado', { workspaceId, userId });
+
+        // Create workspace member record
+        await client.query(
+          `INSERT INTO workspace_members (id, workspace_id, user_id, role, invited_by, joined_at) 
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+          [uuidv4(), workspaceId, userId, 'admin', userId, new Date()]
+        );
+        logger.info('Membro do workspace criado', { workspaceId, userId });
+
+        return { userId, workspaceId };
+      });
+
+      // Generate token
+      const token = generateToken({
+        userId: result.userId,
+        workspaceId: result.workspaceId,
+        role: 'admin'
+      });
+      logger.info('Token JWT gerado');
+
+      // Log audit event
+      await this.logAuditEvent(result.workspaceId, result.userId, 'user.register', 'user', result.userId, {
+        email,
+        name
+      }, req);
+      logger.info('Evento de auditoria registrado');
+
+      res.status(201).json({
+        success: true,
+        data: {
+          token,
+          user: {
+            id: result.userId,
+            name,
+            email,
+            role: 'admin',
+            workspaceId: result.workspaceId
+          }
+        }
+      });
+    } catch (error) {
+      logger.error('Erro no registro de usuário', { error });
+      throw error;
+    }
   }
 
   async login(req: Request, res: Response) {
