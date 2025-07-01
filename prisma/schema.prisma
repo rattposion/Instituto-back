@@ -1,0 +1,269 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Workspace {
+  id          String   @id @default(cuid())
+  name        String   @db.VarChar(100)
+  slug        String   @unique @db.VarChar(100)
+  description String?
+  ownerId     String   @map("owner_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  members      WorkspaceMember[]
+  pixels       Pixel[]
+  integrations Integration[]
+
+  @@map("workspaces")
+}
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique @db.VarChar(255)
+  passwordHash String    @map("password_hash") @db.VarChar(255)
+  name         String    @db.VarChar(100)
+  avatar       String?
+  isActive     Boolean   @default(true) @map("is_active")
+  lastLogin    DateTime? @map("last_login")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  // Relations
+  workspaceMembers WorkspaceMember[]
+  createdPixels    Pixel[]           @relation("PixelCreator")
+  createdConversions Conversion[]    @relation("ConversionCreator")
+  createdIntegrations Integration[]  @relation("IntegrationCreator")
+  createdDiagnostics Diagnostic[]   @relation("DiagnosticCreator")
+
+  @@map("users")
+}
+
+model WorkspaceMember {
+  id          String   @id @default(cuid())
+  workspaceId String   @map("workspace_id")
+  userId      String   @map("user_id")
+  role        Role
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, userId])
+  @@map("workspace_members")
+}
+
+model Pixel {
+  id              String    @id @default(cuid())
+  name            String    @db.VarChar(100)
+  pixelId         String    @map("pixel_id") @db.VarChar(20)
+  metaAccount     String    @map("meta_account") @db.VarChar(100)
+  description     String?
+  status          PixelStatus @default(ACTIVE)
+  settings        Json      @default("{}")
+  workspaceId     String    @map("workspace_id")
+  createdBy       String    @map("created_by")
+  isActive        Boolean   @default(true) @map("is_active")
+  lastActivity    DateTime? @map("last_activity")
+  eventsCount     Int       @default(0) @map("events_count")
+  conversionsCount Int      @default(0) @map("conversions_count")
+  revenue         Decimal   @default(0) @db.Decimal(12, 2)
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  // Relations
+  workspace         Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  creator           User                @relation("PixelCreator", fields: [createdBy], references: [id])
+  events            Event[]
+  conversions       Conversion[]
+  diagnostics       Diagnostic[]
+  integrationPixels IntegrationPixel[]
+
+  @@unique([pixelId, workspaceId])
+  @@map("pixels")
+}
+
+model Event {
+  id           String      @id @default(cuid())
+  pixelId      String      @map("pixel_id")
+  eventName    String      @map("event_name") @db.VarChar(100)
+  eventType    EventType   @default(STANDARD) @map("event_type")
+  parameters   Json        @default("{}")
+  source       EventSource @default(WEB)
+  userAgent    String?     @map("user_agent")
+  ipAddress    String?     @map("ip_address")
+  status       EventStatus @default(SUCCESS)
+  errorMessage String?     @map("error_message")
+  createdAt    DateTime    @default(now()) @map("created_at")
+
+  // Relations
+  pixel Pixel @relation(fields: [pixelId], references: [id], onDelete: Cascade)
+
+  @@index([pixelId])
+  @@index([createdAt])
+  @@index([eventName])
+  @@map("events")
+}
+
+model Conversion {
+  id          String   @id @default(cuid())
+  name        String   @db.VarChar(100)
+  pixelId     String   @map("pixel_id")
+  eventName   String   @map("event_name") @db.VarChar(100)
+  description String?
+  rules       Json     @default("[]")
+  isActive    Boolean  @default(true) @map("is_active")
+  createdBy   String   @map("created_by")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  pixel   Pixel @relation(fields: [pixelId], references: [id], onDelete: Cascade)
+  creator User  @relation("ConversionCreator", fields: [createdBy], references: [id])
+
+  @@unique([name, pixelId])
+  @@map("conversions")
+}
+
+model Diagnostic {
+  id          String             @id @default(cuid())
+  pixelId     String             @map("pixel_id")
+  severity    DiagnosticSeverity
+  category    DiagnosticCategory
+  title       String             @db.VarChar(200)
+  description String
+  url         String?
+  status      DiagnosticStatus   @default(ACTIVE)
+  createdBy   String?            @map("created_by")
+  createdAt   DateTime           @default(now()) @map("created_at")
+  updatedAt   DateTime           @updatedAt @map("updated_at")
+
+  // Relations
+  pixel   Pixel @relation(fields: [pixelId], references: [id], onDelete: Cascade)
+  creator User? @relation("DiagnosticCreator", fields: [createdBy], references: [id])
+
+  @@index([pixelId])
+  @@index([status])
+  @@map("diagnostics")
+}
+
+model Integration {
+  id          String            @id @default(cuid())
+  type        IntegrationType
+  name        String            @db.VarChar(100)
+  description String?
+  config      Json              @default("{}")
+  isActive    Boolean           @default(true) @map("is_active")
+  workspaceId String            @map("workspace_id")
+  createdBy   String            @map("created_by")
+  lastSync    DateTime?         @map("last_sync")
+  createdAt   DateTime          @default(now()) @map("created_at")
+  updatedAt   DateTime          @updatedAt @map("updated_at")
+
+  // Relations
+  workspace         Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  creator           User               @relation("IntegrationCreator", fields: [createdBy], references: [id])
+  integrationPixels IntegrationPixel[]
+
+  @@index([workspaceId])
+  @@map("integrations")
+}
+
+model IntegrationPixel {
+  id            String   @id @default(cuid())
+  integrationId String   @map("integration_id")
+  pixelId       String   @map("pixel_id")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  // Relations
+  integration Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  pixel       Pixel       @relation(fields: [pixelId], references: [id], onDelete: Cascade)
+
+  @@unique([integrationId, pixelId])
+  @@map("integration_pixels")
+}
+
+// Enums
+enum Role {
+  ADMIN
+  MANAGER
+  VIEWER
+
+  @@map("role")
+}
+
+enum PixelStatus {
+  ACTIVE
+  INACTIVE
+  ERROR
+
+  @@map("pixel_status")
+}
+
+enum EventType {
+  STANDARD
+  CUSTOM
+
+  @@map("event_type")
+}
+
+enum EventSource {
+  WEB
+  SERVER
+  MOBILE
+
+  @@map("event_source")
+}
+
+enum EventStatus {
+  SUCCESS
+  ERROR
+  PENDING
+
+  @@map("event_status")
+}
+
+enum DiagnosticSeverity {
+  INFO
+  WARNING
+  ERROR
+  SUCCESS
+
+  @@map("diagnostic_severity")
+}
+
+enum DiagnosticCategory {
+  IMPLEMENTATION
+  EVENTS
+  PERFORMANCE
+  CONNECTION
+
+  @@map("diagnostic_category")
+}
+
+enum DiagnosticStatus {
+  ACTIVE
+  RESOLVED
+
+  @@map("diagnostic_status")
+}
+
+enum IntegrationType {
+  GTM
+  WORDPRESS
+  SHOPIFY
+  WEBHOOK
+
+  @@map("integration_type")
+}
