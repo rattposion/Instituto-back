@@ -299,7 +299,9 @@ router.get('/analytics/summary', authenticateToken, async (req: AuthRequest, res
     const queryParams = [req.user!.workspaceId];
     if (pixelId) {
       pixelFilter = 'AND e.pixel_id = $2';
-      queryParams.push(pixelId);
+      if (typeof pixelId === 'string') {
+        queryParams.push(pixelId);
+      }
     }
 
     // Get summary statistics

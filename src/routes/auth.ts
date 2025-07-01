@@ -5,7 +5,7 @@ import { validate } from '../middleware/validation';
 import { authenticateToken, AuthRequest } from '../middleware/auth';
 import { createError } from '../middleware/errorHandler';
 import { logger } from '../utils/logger';
-import { prisma } from '../config/database';
+import { prisma } from '../config/prisma';
 import Joi from 'joi';
 
 const router = Router();
@@ -35,9 +35,11 @@ const changePasswordSchema = Joi.object({
 
 // Generate JWT token
 const generateToken = (userId: string): string => {
+  const secret = process.env.JWT_SECRET;
+  if (!secret) throw new Error('JWT_SECRET não definida nas variáveis de ambiente');
   return jwt.sign(
     { userId },
-    process.env.JWT_SECRET!,
+    secret,
     { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
   );
 };

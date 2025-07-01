@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
-import { prisma } from '../config/database';
+import { prisma } from '../config/prisma';
 import { logger } from '../utils/logger';
 
 export interface AuthRequest extends Request {
@@ -56,6 +56,7 @@ export const authenticateToken = async (req: AuthRequest, res: Response, next: N
     };
 
     next();
+    return;
   } catch (error) {
     logger.error('Authentication error:', error);
     return res.status(401).json({
@@ -82,5 +83,6 @@ export const requireRole = (roles: string[]) => {
     }
 
     next();
+    return;
   };
 };

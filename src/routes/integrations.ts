@@ -152,7 +152,7 @@ router.post('/', authenticateToken, requireRole(['admin', 'manager']), validate(
     // Validate config based on integration type
     const validationResult = validateIntegrationConfig(type, config);
     if (!validationResult.isValid) {
-      throw createError(validationResult.error, 400);
+      throw createError(validationResult.error || 'Erro de validação', 400);
     }
 
     const id = uuidv4();
@@ -213,7 +213,7 @@ router.put('/:id', authenticateToken, requireRole(['admin', 'manager']), validat
       // Validate config
       const validationResult = validateIntegrationConfig(existingIntegration.rows[0].type, config);
       if (!validationResult.isValid) {
-        throw createError(validationResult.error, 400);
+        throw createError(validationResult.error || 'Erro de validação', 400);
       }
 
       updates.push(`config = $${paramCount++}`);
@@ -507,7 +507,7 @@ async function testIntegration(integration: any): Promise<{ success: boolean; me
     return {
       success: false,
       message: 'Integration test failed',
-      details: { error: error.message }
+      details: { error: error instanceof Error ? error.message : String(error) }
     };
   }
 }

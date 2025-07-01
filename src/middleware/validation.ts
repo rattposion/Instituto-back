@@ -14,6 +14,7 @@ export const validate = (schema: Joi.ObjectSchema) => {
     }
     
     next();
+    return;
   };
 };
 
@@ -30,6 +31,7 @@ export const validateQuery = (schema: Joi.ObjectSchema) => {
     }
     
     next();
+    return;
   };
 };
 
@@ -46,5 +48,6 @@ export const validateParams = (schema: Joi.ObjectSchema) => {
     }
     
     next();
+    return;
   };
 };
