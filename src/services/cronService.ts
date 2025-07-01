@@ -123,7 +123,7 @@ async function updatePixelStats(pixelId: string) {
   let conversions = 0;
   let revenue = 0;
 
-  events.forEach(event => {
+  events.forEach((event: any) => {
     if (event.event_name === 'Purchase' && event.parameters?.value) {
       conversions++;
       revenue += parseFloat(event.parameters.value);

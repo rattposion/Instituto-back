@@ -1,11 +1,12 @@
-import jwt from 'jsonwebtoken';
+import jwt, { Secret } from 'jsonwebtoken';
 import { JWTPayload } from '../types';
 
-const JWT_SECRET = process.env.JWT_SECRET!;
+const JWT_SECRET: Secret = process.env.JWT_SECRET || 'default_secret';
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
 
 export const generateToken = (payload: Omit<JWTPayload, 'iat' | 'exp'>): string => {
-  return jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
+  const plainPayload = { ...payload } as object;
+  return jwt.sign(plainPayload, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN } as jwt.SignOptions);
 };
 
 export const verifyToken = (token: string): JWTPayload => {

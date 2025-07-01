@@ -112,7 +112,7 @@ export class WebhookController {
       }
 
       // Process Shopify webhook data
-      await this.processShopifyData(integration, payload);
+      await this.processShopifyData(integration, payload, req);
 
       res.status(200).json({ success: true });
     } catch (error) {
@@ -214,11 +214,11 @@ export class WebhookController {
     }
   }
 
-  private async processShopifyData(integration: any, payload: any) {
+  private async processShopifyData(integration: any, payload: any, req?: Request) {
     try {
       // Get connected pixels for this integration
       const { data: pixels } = await Database.query('SELECT id FROM pixels WHERE workspace_id = $1', [integration.workspace_id])
-        .then(result => result.rows.map(row => row.id))
+        .then(result => result.rows.map((row: any) => row.id))
         .catch(() => []);
 
       if (!pixels || pixels.length === 0) {
@@ -226,7 +226,7 @@ export class WebhookController {
       }
 
       // Process different Shopify webhook types
-      switch (payload.topic || req.get('X-Shopify-Topic')) {
+      switch (payload.topic || (req && req.get ? req.get('X-Shopify-Topic') : undefined)) {
         case 'orders/create':
           await this.processShopifyOrder(pixels[0], payload, 'Purchase');
           break;
@@ -348,7 +348,7 @@ export class WebhookController {
     try {
       // Get connected pixels for this integration
       const { data: pixels } = await Database.query('SELECT id FROM pixels WHERE workspace_id = $1', [integration.workspace_id])
-        .then(result => result.rows.map(row => row.id))
+        .then(result => result.rows.map((row: any) => row.id))
         .catch(() => []);
 
       if (!pixels || pixels.length === 0) {

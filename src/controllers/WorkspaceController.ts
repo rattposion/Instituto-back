@@ -9,76 +9,53 @@ export class WorkspaceController {
   async getWorkspaces(req: AuthRequest, res: Response) {
     const { page = 1, limit = 20, search } = req.query;
     const offset = (Number(page) - 1) * Number(limit);
-
-    let query = Database.query(`
-      SELECT
-        workspaces!inner(id, name, slug, description, is_active, created_at),
-        role
-      FROM workspace_members
-      WHERE user_id = ${req.user!.id}
-      ORDER BY created_at DESC
-      LIMIT ${limit} OFFSET ${offset}
-    `);
-
+    let whereClauses: string[] = ['wm.user_id = $1'];
+    let params: any[] = [req.user!.id];
+    let paramIndex = 2;
     if (search) {
-      query = query.ilike('workspaces.name', `%${search}%`);
+      whereClauses.push('w.name ILIKE $' + paramIndex);
+      params.push(`%${search}%`);
+      paramIndex++;
     }
-
-    const { data: workspaceMembers, error, count } = await query;
-
-    if (error) {
-      logger.error('Error fetching workspaces:', error);
-      throw createError('Failed to fetch workspaces', 500);
-    }
-
-    const workspaces = workspaceMembers?.map(member => ({
-      ...member.workspaces,
+    const where = whereClauses.length > 0 ? 'WHERE ' + whereClauses.join(' AND ') : '';
+    const sql = `SELECT w.id, w.name, w.slug, w.description, w.is_active, w.created_at, wm.role, count(*) OVER() AS total_count FROM workspace_members wm INNER JOIN workspaces w ON wm.workspace_id = w.id ${where} ORDER BY w.created_at DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+    params.push(Number(limit), offset);
+    const result = await Database.query(sql, params);
+    const workspaceMembers = result.rows;
+    const total = workspaceMembers.length > 0 ? Number(workspaceMembers[0].total_count) : 0;
+    const workspaces = workspaceMembers.map((member: any) => ({
+      id: member.id,
+      name: member.name,
+      slug: member.slug,
+      description: member.description,
+      is_active: member.is_active,
+      created_at: member.created_at,
       role: member.role
-    })) || [];
-
+    }));
     res.json({
       success: true,
       data: workspaces,
       pagination: {
         page: Number(page),
         limit: Number(limit),
-        total: count || 0,
-        totalPages: Math.ceil((count || 0) / Number(limit))
+        total,
+        totalPages: Math.ceil(total / Number(limit))
       }
     });
   }
 
   async createWorkspace(req: AuthRequest, res: Response) {
     const { name, description } = req.body;
-
     const workspaceId = uuidv4();
     const slug = name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
-
-    // Create workspace
-    const { data: workspace, error: workspaceError } = await Database.query(`
-      INSERT INTO workspaces (id, name, slug, description, owner_id, settings, is_active)
-      VALUES (${workspaceId}, ${name}, ${slug}, ${description}, ${req.user!.id}, {}, true)
-      RETURNING *
-    `);
-
-    if (workspaceError) {
-      logger.error('Error creating workspace:', workspaceError);
-      throw createError('Failed to create workspace', 500);
-    }
-
-    // Add user as admin member
-    const { error: memberError } = await Database.query(`
-      INSERT INTO workspace_members (id, workspace_id, user_id, role, invited_by, joined_at)
-      VALUES (${uuidv4()}, ${workspaceId}, ${req.user!.id}, 'admin', ${req.user!.id}, ${new Date().toISOString()})
-    `);
-
-    if (memberError) {
-      logger.error('Error adding workspace member:', memberError);
-      // Cleanup workspace
-      await Database.query(`DELETE FROM workspaces WHERE id = ${workspaceId}`);
-      throw createError('Failed to create workspace', 500);
-    }
-
+    const created_at = new Date().toISOString();
+    const sql = `INSERT INTO workspaces (id, name, slug, description, owner_id, settings, is_active, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8) RETURNING *`;
+    const values = [workspaceId, name, slug, description, req.user!.id, JSON.stringify({}), true, created_at];
+    const result = await Database.query(sql, values);
+    const workspace = result.rows[0];
+    // Adiciona usuário como admin
+    const memberSql = `INSERT INTO workspace_members (id, workspace_id, user_id, role, invited_by, joined_at, created_at) VALUES ($1,$2,$3,'admin',$4,$5,$5)`;
+    await Database.query(memberSql, [uuidv4(), workspaceId, req.user!.id, req.user!.id, created_at]);
     res.status(201).json({
       success: true,
       data: workspace
@@ -87,30 +64,18 @@ export class WorkspaceController {
 
   async getWorkspaceById(req: AuthRequest, res: Response) {
     const { id } = req.params;
-
-    // Check if user has access to workspace
-    const { data: member, error: memberError } = await Database.query(`
-      SELECT role
-      FROM workspace_members
-      WHERE workspace_id = ${id} AND user_id = ${req.user!.id}
-      LIMIT 1
-    `);
-
-    if (memberError || !member) {
+    const memberSql = 'SELECT role FROM workspace_members WHERE workspace_id = $1 AND user_id = $2 LIMIT 1';
+    const memberResult = await Database.query(memberSql, [id, req.user!.id]);
+    const member = memberResult.rows[0];
+    if (!member) {
       throw createError('Workspace not found', 404);
     }
-
-    const { data: workspace, error } = await Database.query(`
-      SELECT *
-      FROM workspaces
-      WHERE id = ${id}
-      LIMIT 1
-    `);
-
-    if (error || !workspace) {
+    const wsSql = 'SELECT * FROM workspaces WHERE id = $1 LIMIT 1';
+    const wsResult = await Database.query(wsSql, [id]);
+    const workspace = wsResult.rows[0];
+    if (!workspace) {
       throw createError('Workspace not found', 404);
     }
-
     res.json({
       success: true,
       data: {
@@ -123,46 +88,24 @@ export class WorkspaceController {
   async updateWorkspace(req: AuthRequest, res: Response) {
     const { id } = req.params;
     const { name, description, settings } = req.body;
-
-    // Check if user is admin of workspace
-    const { data: member, error: memberError } = await Database.query(`
-      SELECT role
-      FROM workspace_members
-      WHERE workspace_id = ${id} AND user_id = ${req.user!.id} AND role = 'admin'
-      LIMIT 1
-    `);
-
-    if (memberError || !member) {
+    // Verifica se é admin
+    const memberSql = 'SELECT role FROM workspace_members WHERE workspace_id = $1 AND user_id = $2 AND role = $3 LIMIT 1';
+    const memberResult = await Database.query(memberSql, [id, req.user!.id, 'admin']);
+    const member = memberResult.rows[0];
+    if (!member) {
       throw createError('Access denied', 403);
     }
-
-    const updateData: any = {
-      updated_at: new Date().toISOString()
-    };
-
-    if (name !== undefined) {
-      updateData.name = name;
-      updateData.slug = name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
-    }
-    if (description !== undefined) updateData.description = description;
-    if (settings !== undefined) updateData.settings = settings;
-
-    const { data: workspace, error } = await Database.query(`
-      UPDATE workspaces
-      SET name = ${updateData.name},
-          slug = ${updateData.slug},
-          description = ${updateData.description},
-          settings = ${updateData.settings},
-          updated_at = ${updateData.updated_at}
-      WHERE id = ${id}
-      RETURNING *
-    `);
-
-    if (error) {
-      logger.error('Error updating workspace:', error);
-      throw createError('Failed to update workspace', 500);
-    }
-
+    const updateFields: string[] = [];
+    const params: any[] = [];
+    let paramIndex = 1;
+    if (name !== undefined) { updateFields.push(`name = $${paramIndex}`); params.push(name); paramIndex++; updateFields.push(`slug = $${paramIndex}`); params.push(name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '')); paramIndex++; }
+    if (description !== undefined) { updateFields.push(`description = $${paramIndex}`); params.push(description); paramIndex++; }
+    if (settings !== undefined) { updateFields.push(`settings = $${paramIndex}`); params.push(settings); paramIndex++; }
+    updateFields.push(`updated_at = $${paramIndex}`); params.push(new Date().toISOString()); paramIndex++;
+    params.push(id);
+    const sql = `UPDATE workspaces SET ${updateFields.join(', ')} WHERE id = $${paramIndex} RETURNING *`;
+    const result = await Database.query(sql, params);
+    const workspace = result.rows[0];
     res.json({
       success: true,
       data: workspace
@@ -171,27 +114,13 @@ export class WorkspaceController {
 
   async deleteWorkspace(req: AuthRequest, res: Response) {
     const { id } = req.params;
-
-    // Check if user is owner of workspace
-    const { data: workspace, error: workspaceError } = await Database.query(`
-      SELECT owner_id, name
-      FROM workspaces
-      WHERE id = ${id} AND owner_id = ${req.user!.id}
-      LIMIT 1
-    `);
-
-    if (workspaceError || !workspace) {
+    // Verifica se é owner
+    const wsResult = await Database.query('SELECT owner_id, name FROM workspaces WHERE id = $1 AND owner_id = $2 LIMIT 1', [id, req.user!.id]);
+    const workspace = wsResult.rows[0];
+    if (!workspace) {
       throw createError('Workspace not found or access denied', 404);
     }
-
-    // Delete workspace (cascade will handle related data)
-    const { error } = await Database.query(`DELETE FROM workspaces WHERE id = ${id}`);
-
-    if (error) {
-      logger.error('Error deleting workspace:', error);
-      throw createError('Failed to delete workspace', 500);
-    }
-
+    await Database.query('DELETE FROM workspaces WHERE id = $1', [id]);
     res.json({
       success: true,
       message: 'Workspace deleted successfully'
@@ -202,52 +131,39 @@ export class WorkspaceController {
     const { id } = req.params;
     const { page = 1, limit = 20, search, role } = req.query;
     const offset = (Number(page) - 1) * Number(limit);
-
-    // Check if user has access to workspace
-    const { data: userMember, error: memberError } = await Database.query(`
-      SELECT role
-      FROM workspace_members
-      WHERE workspace_id = ${id} AND user_id = ${req.user!.id}
-      LIMIT 1
-    `);
-
-    if (memberError || !userMember) {
+    // Verifica acesso
+    const memberResult = await Database.query('SELECT role FROM workspace_members WHERE workspace_id = $1 AND user_id = $2 LIMIT 1', [id, req.user!.id]);
+    const userMember = memberResult.rows[0];
+    if (!userMember) {
       throw createError('Workspace not found', 404);
     }
-
-    let query = Database.query(`
-      SELECT
-        id, role, joined_at, created_at,
-        users!inner(id, name, email, avatar, last_login)
-      FROM workspace_members
-      WHERE workspace_id = ${id}
-      ORDER BY created_at DESC
-      LIMIT ${limit} OFFSET ${offset}
-    `);
-
+    let whereClauses: string[] = ['wm.workspace_id = $1'];
+    let params: any[] = [id];
+    let paramIndex = 2;
     if (search) {
-      query = query.or(`users.name.ilike.%${search}%,users.email.ilike.%${search}%`);
+      whereClauses.push('(u.name ILIKE $' + paramIndex + ' OR u.email ILIKE $' + (paramIndex + 1) + ')');
+      params.push(`%${search}%`, `%${search}%`);
+      paramIndex += 2;
     }
-
     if (role) {
-      query = query.eq('role', role);
+      whereClauses.push('wm.role = $' + paramIndex);
+      params.push(role);
+      paramIndex++;
     }
-
-    const { data: members, error, count } = await query;
-
-    if (error) {
-      logger.error('Error fetching workspace members:', error);
-      throw createError('Failed to fetch members', 500);
-    }
-
+    const where = whereClauses.length > 0 ? 'WHERE ' + whereClauses.join(' AND ') : '';
+    const sql = `SELECT wm.id, wm.role, wm.joined_at, wm.created_at, u.id as user_id, u.name, u.email, u.avatar, u.last_login, count(*) OVER() AS total_count FROM workspace_members wm INNER JOIN users u ON wm.user_id = u.id ${where} ORDER BY wm.created_at DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+    params.push(Number(limit), offset);
+    const result = await Database.query(sql, params);
+    const members = result.rows;
+    const total = members.length > 0 ? Number(members[0].total_count) : 0;
     res.json({
       success: true,
       data: members,
       pagination: {
         page: Number(page),
         limit: Number(limit),
-        total: count || 0,
-        totalPages: Math.ceil((count || 0) / Number(limit))
+        total,
+        totalPages: Math.ceil(total / Number(limit))
       }
     });
   }
@@ -255,58 +171,29 @@ export class WorkspaceController {
   async inviteMember(req: AuthRequest, res: Response) {
     const { id } = req.params;
     const { email, role } = req.body;
-
-    // Check if user can invite to workspace
-    const { data: userMember, error: memberError } = await Database.query(`
-      SELECT role
-      FROM workspace_members
-      WHERE workspace_id = ${id} AND user_id = ${req.user!.id}
-      LIMIT 1
-    `);
-
-    if (memberError || !userMember || !['admin', 'manager'].includes(userMember.role)) {
+    // Verifica permissão
+    const memberResult = await Database.query('SELECT role FROM workspace_members WHERE workspace_id = $1 AND user_id = $2 LIMIT 1', [id, req.user!.id]);
+    const userMember = memberResult.rows[0];
+    if (!userMember || !['admin', 'manager'].includes(userMember.role)) {
       throw createError('Access denied', 403);
     }
-
-    // Check if user exists
-    const { data: invitedUser, error: userError } = await Database.query(`
-      SELECT id, name
-      FROM users
-      WHERE email = ${email}
-      LIMIT 1
-    `);
-
-    if (userError || !invitedUser) {
+    // Busca usuário
+    const userResult = await Database.query('SELECT id, name FROM users WHERE email = $1 LIMIT 1', [email]);
+    const invitedUser = userResult.rows[0];
+    if (!invitedUser) {
       throw createError('User not found', 404);
     }
-
-    // Check if user is already a member
-    const { data: existingMember } = await Database.query(`
-      SELECT id
-      FROM workspace_members
-      WHERE workspace_id = ${id} AND user_id = ${invitedUser.id}
-      LIMIT 1
-    `);
-
-    if (existingMember) {
+    // Verifica se já é membro
+    const existingResult = await Database.query('SELECT id FROM workspace_members WHERE workspace_id = $1 AND user_id = $2 LIMIT 1', [id, invitedUser.id]);
+    if (existingResult.rows.length > 0) {
       throw createError('User is already a member of this workspace', 409);
     }
-
-    // Add member to workspace
-    const { data: member, error } = await Database.query(`
-      INSERT INTO workspace_members (id, workspace_id, user_id, role, invited_by, joined_at)
-      VALUES (${uuidv4()}, ${id}, ${invitedUser.id}, ${role}, ${req.user!.id}, ${new Date().toISOString()})
-      RETURNING id, role, joined_at, created_at,
-                users!inner(id, name, email, avatar)
-    `);
-
-    if (error) {
-      logger.error('Error inviting member:', error);
-      throw createError('Failed to invite member', 500);
-    }
-
-    // TODO: Send invitation email
-
+    // Adiciona membro
+    const now = new Date().toISOString();
+    const memberSql = 'INSERT INTO workspace_members (id, workspace_id, user_id, role, invited_by, joined_at, created_at) VALUES ($1,$2,$3,$4,$5,$6,$6) RETURNING id, role, joined_at, created_at';
+    const memberResult2 = await Database.query(memberSql, [uuidv4(), id, invitedUser.id, role, req.user!.id, now]);
+    const member = memberResult2.rows[0];
+    // TODO: Enviar email de convite
     res.status(201).json({
       success: true,
       data: member
@@ -315,39 +202,19 @@ export class WorkspaceController {
 
   async removeMember(req: AuthRequest, res: Response) {
     const { id, userId } = req.params;
-
-    // Check if user is admin of workspace
-    const { data: userMember, error: memberError } = await Database.query(`
-      SELECT role
-      FROM workspace_members
-      WHERE workspace_id = ${id} AND user_id = ${req.user!.id} AND role = 'admin'
-      LIMIT 1
-    `);
-
-    if (memberError || !userMember) {
+    // Verifica admin
+    const memberResult = await Database.query('SELECT role FROM workspace_members WHERE workspace_id = $1 AND user_id = $2 AND role = $3 LIMIT 1', [id, req.user!.id, 'admin']);
+    const userMember = memberResult.rows[0];
+    if (!userMember) {
       throw createError('Access denied', 403);
     }
-
-    // Prevent removing workspace owner
-    const { data: workspace } = await Database.query(`
-      SELECT owner_id
-      FROM workspaces
-      WHERE id = ${id}
-      LIMIT 1
-    `);
-
+    // Não pode remover owner
+    const wsResult = await Database.query('SELECT owner_id FROM workspaces WHERE id = $1 LIMIT 1', [id]);
+    const workspace = wsResult.rows[0];
     if (workspace?.owner_id === userId) {
       throw createError('Cannot remove workspace owner', 400);
     }
-
-    // Remove member
-    const { error } = await Database.query(`DELETE FROM workspace_members WHERE workspace_id = ${id} AND user_id = ${userId}`);
-
-    if (error) {
-      logger.error('Error removing member:', error);
-      throw createError('Failed to remove member', 500);
-    }
-
+    await Database.query('DELETE FROM workspace_members WHERE workspace_id = $1 AND user_id = $2', [id, userId]);
     res.json({
       success: true,
       message: 'Member removed successfully'
@@ -357,45 +224,21 @@ export class WorkspaceController {
   async updateMemberRole(req: AuthRequest, res: Response) {
     const { id, userId } = req.params;
     const { role } = req.body;
-
-    // Check if user is admin of workspace
-    const { data: userMember, error: memberError } = await Database.query(`
-      SELECT role
-      FROM workspace_members
-      WHERE workspace_id = ${id} AND user_id = ${req.user!.id} AND role = 'admin'
-      LIMIT 1
-    `);
-
-    if (memberError || !userMember) {
+    // Verifica admin
+    const memberResult = await Database.query('SELECT role FROM workspace_members WHERE workspace_id = $1 AND user_id = $2 AND role = $3 LIMIT 1', [id, req.user!.id, 'admin']);
+    const userMember = memberResult.rows[0];
+    if (!userMember) {
       throw createError('Access denied', 403);
     }
-
-    // Prevent changing workspace owner role
-    const { data: workspace } = await Database.query(`
-      SELECT owner_id
-      FROM workspaces
-      WHERE id = ${id}
-      LIMIT 1
-    `);
-
+    // Não pode mudar owner
+    const wsResult = await Database.query('SELECT owner_id FROM workspaces WHERE id = $1 LIMIT 1', [id]);
+    const workspace = wsResult.rows[0];
     if (workspace?.owner_id === userId && role !== 'admin') {
       throw createError('Cannot change workspace owner role', 400);
     }
-
-    // Update member role
-    const { data: member, error } = await Database.query(`
-      UPDATE workspace_members
-      SET role = ${role}
-      WHERE workspace_id = ${id} AND user_id = ${userId}
-      RETURNING id, role, joined_at, created_at,
-                users!inner(id, name, email, avatar)
-    `);
-
-    if (error) {
-      logger.error('Error updating member role:', error);
-      throw createError('Failed to update member role', 500);
-    }
-
+    const memberSql = 'UPDATE workspace_members SET role = $1 WHERE workspace_id = $2 AND user_id = $3 RETURNING id, role, joined_at, created_at';
+    const memberResult2 = await Database.query(memberSql, [role, id, userId]);
+    const member = memberResult2.rows[0];
     res.json({
       success: true,
       data: member
@@ -405,77 +248,36 @@ export class WorkspaceController {
   async getWorkspaceAnalytics(req: AuthRequest, res: Response) {
     const { id } = req.params;
     const { timeframe = '7d' } = req.query;
-
-    // Check if user has access to workspace
-    const { data: member, error: memberError } = await Database.query(`
-      SELECT role
-      FROM workspace_members
-      WHERE workspace_id = ${id} AND user_id = ${req.user!.id}
-      LIMIT 1
-    `);
-
-    if (memberError || !member) {
+    // Verifica acesso
+    const memberResult = await Database.query('SELECT role FROM workspace_members WHERE workspace_id = $1 AND user_id = $2 LIMIT 1', [id, req.user!.id]);
+    const member = memberResult.rows[0];
+    if (!member) {
       throw createError('Workspace not found', 404);
     }
-
-    // Calculate date range
+    // Datas
     const endDate = new Date();
     const startDate = new Date();
-    
     switch (timeframe) {
-      case '24h':
-        startDate.setDate(startDate.getDate() - 1);
-        break;
-      case '7d':
-        startDate.setDate(startDate.getDate() - 7);
-        break;
-      case '30d':
-        startDate.setDate(startDate.getDate() - 30);
-        break;
-      default:
-        startDate.setDate(startDate.getDate() - 7);
+      case '24h': startDate.setDate(startDate.getDate() - 1); break;
+      case '7d': startDate.setDate(startDate.getDate() - 7); break;
+      case '30d': startDate.setDate(startDate.getDate() - 30); break;
+      default: startDate.setDate(startDate.getDate() - 7);
     }
-
-    // Get workspace statistics
+    // Stats
     const [pixelsResult, eventsResult, conversionsResult] = await Promise.all([
-      // Pixels count
-      Database.query(`
-        SELECT id, status
-        FROM pixels
-        WHERE workspace_id = ${id}
-      `),
-      
-      // Events in timeframe
-      Database.query(`
-        SELECT
-          event_name, timestamp, parameters,
-          pixels!inner(workspace_id)
-        FROM events
-        WHERE pixels.workspace_id = ${id}
-        AND timestamp >= ${startDate.toISOString()}
-        AND timestamp <= ${endDate.toISOString()}
-      `),
-      
-      // Conversions
-      Database.query(`
-        SELECT
-          total_conversions, total_value,
-          pixels!inner(workspace_id)
-        FROM conversions
-        WHERE pixels.workspace_id = ${id}
-      `)
+      Database.query('SELECT id, status FROM pixels WHERE workspace_id = $1', [id]),
+      Database.query('SELECT event_name, timestamp, parameters FROM events WHERE pixel_id IN (SELECT id FROM pixels WHERE workspace_id = $1) AND timestamp >= $2 AND timestamp <= $3', [id, startDate.toISOString(), endDate.toISOString()]),
+      Database.query('SELECT total_conversions, total_value FROM conversions WHERE pixel_id IN (SELECT id FROM pixels WHERE workspace_id = $1)', [id])
     ]);
-
-    const pixels = pixelsResult.data || [];
-    const events = eventsResult.data || [];
-    const conversions = conversionsResult.data || [];
-
+    const pixels = pixelsResult.rows || [];
+    const events = eventsResult.rows || [];
+    const conversions = conversionsResult.rows || [];
     const analytics = {
       pixels: {
         total: pixels.length,
-        active: pixels.filter(p => p.status === 'active').length,
-        inactive: pixels.filter(p => p.status === 'inactive').length,
-        error: pixels.filter(p => p.status === 'error').length
+        active: pixels.filter((p: any) => p.status === 'active').length,
+        inactive: pixels.filter((p: any) => p.status === 'inactive').length,
+        error: pixels.filter((p: any) => p.status === 'error').length
       },
       events: {
         total: events.length,
@@ -483,11 +285,10 @@ export class WorkspaceController {
         byType: this.groupEventsByType(events)
       },
       conversions: {
-        total: conversions.reduce((sum, c) => sum + c.total_conversions, 0),
-        totalValue: conversions.reduce((sum, c) => sum + parseFloat(c.total_value || 0), 0)
+        total: conversions.reduce((sum: number, c: any) => sum + c.total_conversions, 0),
+        totalValue: conversions.reduce((sum: number, c: any) => sum + parseFloat(c.total_value || 0), 0)
       }
     };
-
     res.json({
       success: true,
       data: analytics
@@ -496,7 +297,7 @@ export class WorkspaceController {
 
   private groupEventsByDay(events: any[]) {
     const grouped: { [key: string]: number } = {};
-    events.forEach(event => {
+    events.forEach((event: any) => {
       const day = new Date(event.timestamp).toISOString().split('T')[0];
       grouped[day] = (grouped[day] || 0) + 1;
     });
@@ -505,7 +306,7 @@ export class WorkspaceController {
 
   private groupEventsByType(events: any[]) {
     const grouped: { [key: string]: number } = {};
-    events.forEach(event => {
+    events.forEach((event: any) => {
       grouped[event.event_name] = (grouped[event.event_name] || 0) + 1;
     });
     return grouped;

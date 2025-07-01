@@ -69,12 +69,12 @@ export class AnalyticsController {
       const analytics = {
         overview: {
           totalPixels: pixels.length,
-          activePixels: pixels.filter(p => p.status === 'active').length,
+          activePixels: pixels.filter((p: any) => p.status === 'active').length,
           totalEvents: events.length,
-          totalConversions: conversions.reduce((sum, c) => sum + c.total_conversions, 0),
-          totalRevenue: conversions.reduce((sum, c) => sum + parseFloat(c.total_value || 0), 0),
+          totalConversions: conversions.reduce((sum: any, c: any) => sum + c.total_conversions, 0),
+          totalRevenue: conversions.reduce((sum: any, c: any) => sum + parseFloat(c.total_value || 0), 0),
           averageConversionRate: conversions.length > 0 
-            ? conversions.reduce((sum, c) => sum + c.conversion_rate, 0) / conversions.length 
+            ? conversions.reduce((sum: any, c: any) => sum + c.conversion_rate, 0) / conversions.length 
             : 0
         },
         trends: {
@@ -83,14 +83,14 @@ export class AnalyticsController {
           conversionsByDay: this.groupConversionsByDay(events)
         },
         health: {
-          totalIssues: diagnostics.filter(d => d.status === 'active').length,
-          criticalIssues: diagnostics.filter(d => d.severity === 'error' && d.status === 'active').length,
-          warningIssues: diagnostics.filter(d => d.severity === 'warning' && d.status === 'active').length
+          totalIssues: diagnostics.filter((d: any) => d.status === 'active').length,
+          criticalIssues: diagnostics.filter((d: any) => d.severity === 'error' && d.status === 'active').length,
+          warningIssues: diagnostics.filter((d: any) => d.severity === 'warning' && d.status === 'active').length
         },
         topPixels: pixels
-          .sort((a, b) => b.events_count - a.events_count)
+          .sort((a: any, b: any) => b.events_count - a.events_count)
           .slice(0, 5)
-          .map(p => ({
+          .map((p: any) => ({
             id: p.id,
             eventsCount: p.events_count,
             conversionsCount: p.conversions_count,
@@ -125,21 +125,21 @@ export class AnalyticsController {
       const overview = {
         pixels: {
           total: pixels.length,
-          active: pixels.filter(p => p.status === 'active').length,
-          inactive: pixels.filter(p => p.status === 'inactive').length,
-          error: pixels.filter(p => p.status === 'error').length
+          active: pixels.filter((p: any) => p.status === 'active').length,
+          inactive: pixels.filter((p: any) => p.status === 'inactive').length,
+          error: pixels.filter((p: any) => p.status === 'error').length
         },
         team: {
           total: members.length,
-          admins: members.filter(m => m.role === 'admin').length,
-          managers: members.filter(m => m.role === 'manager').length,
-          viewers: members.filter(m => m.role === 'viewer').length
+          admins: members.filter((m: any) => m.role === 'admin').length,
+          managers: members.filter((m: any) => m.role === 'manager').length,
+          viewers: members.filter((m: any) => m.role === 'viewer').length
         },
         integrations: {
           total: integrations.length,
-          active: integrations.filter(i => i.status === 'active').length,
-          inactive: integrations.filter(i => i.status === 'inactive').length,
-          error: integrations.filter(i => i.status === 'error').length
+          active: integrations.filter((i: any) => i.status === 'active').length,
+          inactive: integrations.filter((i: any) => i.status === 'inactive').length,
+          error: integrations.filter((i: any) => i.status === 'error').length
         }
       };
 
@@ -155,59 +155,41 @@ export class AnalyticsController {
 
   async getEventsAnalytics(req: AuthRequest, res: Response) {
     const { timeframe = '7d', pixelId, eventName } = req.query;
-
-    // Calculate date range
+    // Datas
     const endDate = new Date();
     const startDate = new Date();
-    
     switch (timeframe) {
-      case '1h':
-        startDate.setHours(startDate.getHours() - 1);
-        break;
-      case '24h':
-        startDate.setDate(startDate.getDate() - 1);
-        break;
-      case '7d':
-        startDate.setDate(startDate.getDate() - 7);
-        break;
-      case '30d':
-        startDate.setDate(startDate.getDate() - 30);
-        break;
-      default:
-        startDate.setDate(startDate.getDate() - 7);
+      case '1h': startDate.setHours(startDate.getHours() - 1); break;
+      case '24h': startDate.setDate(startDate.getDate() - 1); break;
+      case '7d': startDate.setDate(startDate.getDate() - 7); break;
+      case '30d': startDate.setDate(startDate.getDate() - 30); break;
+      default: startDate.setDate(startDate.getDate() - 7);
     }
-
     try {
-      let query = Database.query(`
-        SELECT event_name, timestamp, parameters, processed, error_message,
-        pixels.workspace_id, pixels.id AS pixel_id
-        FROM events
-        INNER JOIN pixels ON events.pixel_id = pixels.id
-        WHERE pixels.workspace_id = $1 AND timestamp >= $2 AND timestamp <= $3
-      `, [req.user!.workspaceId, startDate.toISOString(), endDate.toISOString()]);
-
+      let whereClauses: string[] = ['pixels.workspace_id = $1', 'timestamp >= $2', 'timestamp <= $3'];
+      let params: any[] = [req.user!.workspaceId, startDate.toISOString(), endDate.toISOString()];
+      let paramIndex = 4;
       if (pixelId) {
-        query = query.addParam(pixelId);
+        whereClauses.push('pixels.id = $' + paramIndex);
+        params.push(pixelId);
+        paramIndex++;
       }
-
       if (eventName) {
-        query = query.addParam(eventName);
+        whereClauses.push('event_name = $' + paramIndex);
+        params.push(eventName);
+        paramIndex++;
       }
-
-      const { rows: events, error } = await query;
-
-      if (error) {
-        logger.error('Error fetching events analytics:', error);
-        throw createError('Failed to fetch events analytics', 500);
-      }
-
+      const where = whereClauses.length > 0 ? 'WHERE ' + whereClauses.join(' AND ') : '';
+      const sql = `SELECT event_name, timestamp, parameters, processed, error_message, pixels.workspace_id, pixels.id AS pixel_id FROM events INNER JOIN pixels ON events.pixel_id = pixels.id ${where}`;
+      const result = await Database.query(sql, params);
+      const events = result.rows;
       const analytics = {
         summary: {
           totalEvents: events?.length || 0,
-          processedEvents: events?.filter(e => e.processed).length || 0,
-          failedEvents: events?.filter(e => e.error_message).length || 0,
+          processedEvents: events?.filter((e: any) => e.processed).length || 0,
+          failedEvents: events?.filter((e: any) => e.error_message).length || 0,
           successRate: events?.length > 0 
-            ? (events.filter(e => e.processed && !e.error_message).length / events.length) * 100 
+            ? (events.filter((e: any) => e.processed && !e.error_message).length / events.length) * 100 
             : 0
         },
         trends: {
@@ -220,7 +202,6 @@ export class AnalyticsController {
           .slice(0, 10)
           .map(([name, count]) => ({ name, count }))
       };
-
       res.json({
         success: true,
         data: analytics
@@ -233,33 +214,22 @@ export class AnalyticsController {
 
   async getConversionsAnalytics(req: AuthRequest, res: Response) {
     const { timeframe = '7d' } = req.query;
-
     try {
-      const { rows: conversions, error } = await Database.query(`
-        SELECT *,
-        pixels.workspace_id, pixels.id AS pixel_id
-        FROM conversions
-        INNER JOIN pixels ON conversions.pixel_id = pixels.id
-        WHERE pixels.workspace_id = $1
-      `, [req.user!.workspaceId]);
-
-      if (error) {
-        logger.error('Error fetching conversions analytics:', error);
-        throw createError('Failed to fetch conversions analytics', 500);
-      }
-
+      const sql = `SELECT conversions.*, pixels.workspace_id, pixels.id AS pixel_id FROM conversions INNER JOIN pixels ON conversions.pixel_id = pixels.id WHERE pixels.workspace_id = $1`;
+      const result = await Database.query(sql, [req.user!.workspaceId]);
+      const conversions = result.rows;
       const analytics = {
         summary: {
-          totalConversions: conversions?.reduce((sum, c) => sum + c.total_conversions, 0) || 0,
-          totalValue: conversions?.reduce((sum, c) => sum + parseFloat(c.total_value || 0), 0) || 0,
+          totalConversions: conversions?.reduce((sum: any, c: any) => sum + c.total_conversions, 0) || 0,
+          totalValue: conversions?.reduce((sum: any, c: any) => sum + parseFloat(c.total_value || 0), 0) || 0,
           averageValue: conversions?.length > 0 
-            ? conversions.reduce((sum, c) => sum + parseFloat(c.average_value || 0), 0) / conversions.length 
+            ? conversions.reduce((sum: any, c: any) => sum + parseFloat(c.average_value || 0), 0) / conversions.length 
             : 0,
           averageRate: conversions?.length > 0 
-            ? conversions.reduce((sum, c) => sum + c.conversion_rate, 0) / conversions.length 
+            ? conversions.reduce((sum: any, c: any) => sum + c.conversion_rate, 0) / conversions.length 
             : 0
         },
-        byConversion: conversions?.map(c => ({
+        byConversion: conversions?.map((c: any) => ({
           id: c.id,
           name: c.name,
           totalConversions: c.total_conversions,
@@ -268,7 +238,6 @@ export class AnalyticsController {
           isActive: c.is_active
         })) || []
       };
-
       res.json({
         success: true,
         data: analytics
@@ -281,54 +250,30 @@ export class AnalyticsController {
 
   async getRevenueAnalytics(req: AuthRequest, res: Response) {
     const { timeframe = '7d' } = req.query;
-
-    // Calculate date range
     const endDate = new Date();
     const startDate = new Date();
-    
     switch (timeframe) {
-      case '24h':
-        startDate.setDate(startDate.getDate() - 1);
-        break;
-      case '7d':
-        startDate.setDate(startDate.getDate() - 7);
-        break;
-      case '30d':
-        startDate.setDate(startDate.getDate() - 30);
-        break;
-      default:
-        startDate.setDate(startDate.getDate() - 7);
+      case '24h': startDate.setDate(startDate.getDate() - 1); break;
+      case '7d': startDate.setDate(startDate.getDate() - 7); break;
+      case '30d': startDate.setDate(startDate.getDate() - 30); break;
+      default: startDate.setDate(startDate.getDate() - 7);
     }
-
     try {
-      const { rows: events, error } = await Database.query(`
-        SELECT event_name, timestamp, parameters,
-        pixels.workspace_id, pixels.id AS pixel_id
-        FROM events
-        INNER JOIN pixels ON events.pixel_id = pixels.id
-        WHERE pixels.workspace_id = $1 AND event_name = $2 AND timestamp >= $3 AND timestamp <= $4
-      `, ['Purchase', req.user!.workspaceId, startDate.toISOString(), endDate.toISOString()]);
-
-      if (error) {
-        logger.error('Error fetching revenue analytics:', error);
-        throw createError('Failed to fetch revenue analytics', 500);
-      }
-
+      const sql = `SELECT event_name, timestamp, parameters, pixels.workspace_id, pixels.id AS pixel_id FROM events INNER JOIN pixels ON events.pixel_id = pixels.id WHERE pixels.workspace_id = $1 AND event_name = $2 AND timestamp >= $3 AND timestamp <= $4`;
+      const result = await Database.query(sql, [req.user!.workspaceId, 'Purchase', startDate.toISOString(), endDate.toISOString()]);
+      const events = result.rows;
       const revenueByDay: { [key: string]: number } = {};
       const ordersByDay: { [key: string]: number } = {};
       let totalRevenue = 0;
       let totalOrders = 0;
-
-      events?.forEach(event => {
+      events?.forEach((event: any) => {
         const day = new Date(event.timestamp).toISOString().split('T')[0];
         const value = parseFloat(event.parameters?.value || 0);
-        
         revenueByDay[day] = (revenueByDay[day] || 0) + value;
         ordersByDay[day] = (ordersByDay[day] || 0) + 1;
         totalRevenue += value;
         totalOrders++;
       });
-
       const analytics = {
         summary: {
           totalRevenue,
@@ -340,7 +285,6 @@ export class AnalyticsController {
           ordersByDay
         }
       };
-
       res.json({
         success: true,
         data: analytics
@@ -353,45 +297,27 @@ export class AnalyticsController {
 
   async getFunnelAnalytics(req: AuthRequest, res: Response) {
     const { timeframe = '7d', pixelId } = req.query;
-
-    // Calculate date range
     const endDate = new Date();
     const startDate = new Date();
-    
     switch (timeframe) {
-      case '24h':
-        startDate.setDate(startDate.getDate() - 1);
-        break;
-      case '7d':
-        startDate.setDate(startDate.getDate() - 7);
-        break;
-      case '30d':
-        startDate.setDate(startDate.getDate() - 30);
-        break;
-      default:
-        startDate.setDate(startDate.getDate() - 7);
+      case '24h': startDate.setDate(startDate.getDate() - 1); break;
+      case '7d': startDate.setDate(startDate.getDate() - 7); break;
+      case '30d': startDate.setDate(startDate.getDate() - 30); break;
+      default: startDate.setDate(startDate.getDate() - 7);
     }
-
     try {
-      let query = Database.query(`
-        SELECT event_name, timestamp,
-        pixels.workspace_id, pixels.id AS pixel_id
-        FROM events
-        INNER JOIN pixels ON events.pixel_id = pixels.id
-        WHERE pixels.workspace_id = $1 AND timestamp >= $2 AND timestamp <= $3
-      `, [req.user!.workspaceId, startDate.toISOString(), endDate.toISOString()]);
-
+      let whereClauses: string[] = ['pixels.workspace_id = $1', 'timestamp >= $2', 'timestamp <= $3'];
+      let params: any[] = [req.user!.workspaceId, startDate.toISOString(), endDate.toISOString()];
+      let paramIndex = 4;
       if (pixelId) {
-        query = query.addParam(pixelId);
+        whereClauses.push('pixels.id = $' + paramIndex);
+        params.push(pixelId);
+        paramIndex++;
       }
-
-      const { rows: events, error } = await query;
-
-      if (error) {
-        logger.error('Error fetching funnel analytics:', error);
-        throw createError('Failed to fetch funnel analytics', 500);
-      }
-
+      const where = whereClauses.length > 0 ? 'WHERE ' + whereClauses.join(' AND ') : '';
+      const sql = `SELECT event_name, timestamp, pixels.workspace_id, pixels.id AS pixel_id FROM events INNER JOIN pixels ON events.pixel_id = pixels.id ${where}`;
+      const result = await Database.query(sql, params);
+      const events = result.rows;
       // Define funnel steps
       const funnelSteps = [
         { name: 'Page Views', eventName: 'PageView', count: 0 },
@@ -400,30 +326,23 @@ export class AnalyticsController {
         { name: 'Initiate Checkout', eventName: 'InitiateCheckout', count: 0 },
         { name: 'Purchase', eventName: 'Purchase', count: 0 }
       ];
-
-      // Count events for each step
       const eventCounts: { [key: string]: number } = {};
-      events?.forEach(event => {
+      events?.forEach((event: any) => {
         eventCounts[event.event_name] = (eventCounts[event.event_name] || 0) + 1;
       });
-
-      funnelSteps.forEach(step => {
+      funnelSteps.forEach((step: any) => {
         step.count = eventCounts[step.eventName] || 0;
       });
-
-      // Calculate conversion rates
-      const funnelWithRates = funnelSteps.map((step, index) => {
+      const funnelWithRates = funnelSteps.map((step: any, index: number) => {
         const previousStep = index > 0 ? funnelSteps[index - 1] : null;
         const conversionRate = previousStep && previousStep.count > 0 
           ? (step.count / previousStep.count) * 100 
           : 100;
-
         return {
           ...step,
           conversionRate: Math.round(conversionRate * 100) / 100
         };
       });
-
       res.json({
         success: true,
         data: {
@@ -436,7 +355,7 @@ export class AnalyticsController {
         }
       });
     } catch (error) {
-      logger.error('Error in getFunnelAnalytics:', error);
+      logger.error('Error fetching funnel analytics:', error);
       throw createError('Failed to fetch funnel analytics', 500);
     }
   }
@@ -451,7 +370,7 @@ export class AnalyticsController {
         FROM events
         INNER JOIN pixels ON events.pixel_id = pixels.id
         WHERE pixels.workspace_id = $1 AND timestamp >= $2 AND timestamp <= $3
-      `, [req.user!.workspaceId, last15Minutes.toISOString(), Date.now().toISOString()]);
+      `, [req.user!.workspaceId, last15Minutes.toISOString(), new Date().toISOString()]);
 
       if (error) {
         logger.error('Error fetching realtime analytics:', error);
@@ -465,7 +384,7 @@ export class AnalyticsController {
           .sort(([,a], [,b]) => b - a)
           .slice(0, 5)
           .map(([name, count]) => ({ name, count })),
-        recentEvents: recentEvents?.slice(0, 10).map(event => ({
+        recentEvents: recentEvents?.slice(0, 10).map((event: any) => ({
           eventName: event.event_name,
           timestamp: event.timestamp,
           pixelName: event.pixels.name,
@@ -544,7 +463,7 @@ export class AnalyticsController {
 
   private groupEventsByDay(events: any[]): { [key: string]: number } {
     const grouped: { [key: string]: number } = {};
-    events.forEach(event => {
+    events.forEach((event: any) => {
       const day = new Date(event.timestamp).toISOString().split('T')[0];
       grouped[day] = (grouped[day] || 0) + 1;
     });
@@ -553,7 +472,7 @@ export class AnalyticsController {
 
   private groupEventsByHour(events: any[]): { [key: string]: number } {
     const grouped: { [key: string]: number } = {};
-    events.forEach(event => {
+    events.forEach((event: any) => {
       const hour = new Date(event.timestamp).toISOString().substring(0, 13);
       grouped[hour] = (grouped[hour] || 0) + 1;
     });
@@ -562,7 +481,7 @@ export class AnalyticsController {
 
   private groupEventsByMinute(events: any[]): { [key: string]: number } {
     const grouped: { [key: string]: number } = {};
-    events.forEach(event => {
+    events.forEach((event: any) => {
       const minute = new Date(event.timestamp).toISOString().substring(0, 16);
       grouped[minute] = (grouped[minute] || 0) + 1;
     });
@@ -571,7 +490,7 @@ export class AnalyticsController {
 
   private groupEventsByType(events: any[]): { [key: string]: number } {
     const grouped: { [key: string]: number } = {};
-    events.forEach(event => {
+    events.forEach((event: any) => {
       grouped[event.event_name] = (grouped[event.event_name] || 0) + 1;
     });
     return grouped;
@@ -579,7 +498,7 @@ export class AnalyticsController {
 
   private groupConversionsByDay(events: any[]): { [key: string]: number } {
     const grouped: { [key: string]: number } = {};
-    events.forEach(event => {
+    events.forEach((event: any) => {
       if (event.event_name === 'Purchase') {
         const day = new Date(event.timestamp).toISOString().split('T')[0];
         grouped[day] = (grouped[day] || 0) + 1;
@@ -592,8 +511,8 @@ export class AnalyticsController {
     if (data.length === 0) return '';
 
     const headers = Object.keys(data[0]);
-    const rows = data.map(row => 
-      headers.map(header => {
+    const rows = data.map((row: any) => 
+      headers.map((header: string) => {
         const value = row[header];
         if (typeof value === 'object' && value !== null) {
           return `"${JSON.stringify(value).replace(/"/g, '""')}"`;

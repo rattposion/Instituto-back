@@ -9,74 +9,50 @@ export class ConversionController {
   async getConversions(req: AuthRequest, res: Response) {
     const { page = 1, limit = 20, search, pixelId, isActive, sortBy = 'created_at', sortOrder = 'desc' } = req.query;
     const offset = (Number(page) - 1) * Number(limit);
-
-    let query = Database.query(`
-      SELECT
-        *,
-        pixels!inner(id, name, workspace_id)
-      FROM
-        conversions
-      WHERE
-        pixels.workspace_id = ${req.user!.workspaceId}
-      ORDER BY
-        ${sortBy} ${sortOrder === 'asc' ? 'ASC' : 'DESC'}
-      LIMIT
-        ${limit}
-      OFFSET
-        ${offset}
-    `);
-
+    let whereClauses: string[] = ['p.workspace_id = $1'];
+    let params: any[] = [req.user!.workspaceId];
+    let paramIndex = 2;
     if (search) {
-      query = query.ilike('name', `%${search}%`);
+      whereClauses.push('c.name ILIKE $' + paramIndex);
+      params.push(`%${search}%`);
+      paramIndex++;
     }
-
     if (pixelId) {
-      query = query.eq('pixel_id', pixelId);
+      whereClauses.push('c.pixel_id = $' + paramIndex);
+      params.push(pixelId);
+      paramIndex++;
     }
-
     if (isActive !== undefined) {
-      query = query.eq('is_active', isActive === 'true');
+      whereClauses.push('c.is_active = $' + paramIndex);
+      params.push(isActive === 'true');
+      paramIndex++;
     }
-
-    const { data: conversions, error, count } = await query;
-
-    if (error) {
-      logger.error('Error fetching conversions:', error);
-      throw createError('Failed to fetch conversions', 500);
-    }
-
+    const where = whereClauses.length > 0 ? 'WHERE ' + whereClauses.join(' AND ') : '';
+    const sql = `SELECT c.*, p.id as pixel_id, p.name as pixel_name, p.workspace_id, count(*) OVER() AS total_count FROM conversions c INNER JOIN pixels p ON c.pixel_id = p.id ${where} ORDER BY c.${sortBy} ${sortOrder === 'asc' ? 'ASC' : 'DESC'} LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+    params.push(Number(limit), offset);
+    const result = await Database.query(sql, params);
+    const conversions = result.rows;
+    const total = conversions.length > 0 ? Number(conversions[0].total_count) : 0;
     res.json({
       success: true,
       data: conversions,
       pagination: {
         page: Number(page),
         limit: Number(limit),
-        total: count || 0,
-        totalPages: Math.ceil((count || 0) / Number(limit))
+        total,
+        totalPages: Math.ceil(total / Number(limit))
       }
     });
   }
 
   async getConversionById(req: AuthRequest, res: Response) {
     const { id } = req.params;
-
-    const { data: conversion, error } = await Database.query(`
-      SELECT
-        *,
-        pixels!inner(id, name, workspace_id)
-      FROM
-        conversions
-      WHERE
-        id = ${id}
-        AND pixels.workspace_id = ${req.user!.workspaceId}
-      LIMIT
-        1
-    `);
-
-    if (error || !conversion) {
+    const sql = `SELECT c.*, p.id as pixel_id, p.name as pixel_name, p.workspace_id FROM conversions c INNER JOIN pixels p ON c.pixel_id = p.id WHERE c.id = $1 AND p.workspace_id = $2 LIMIT 1`;
+    const result = await Database.query(sql, [id, req.user!.workspaceId]);
+    const conversion = result.rows[0];
+    if (!conversion) {
       throw createError('Conversion not found', 404);
     }
-
     res.json({
       success: true,
       data: conversion
@@ -85,24 +61,12 @@ export class ConversionController {
 
   async createConversion(req: AuthRequest, res: Response) {
     const { name, pixelId, eventName, rules } = req.body;
-
-    // Verify pixel belongs to workspace
-    const { data: pixel, error: pixelError } = await Database.query(`
-      SELECT
-        id
-      FROM
-        pixels
-      WHERE
-        id = ${pixelId}
-        AND workspace_id = ${req.user!.workspaceId}
-      LIMIT
-        1
-    `);
-
-    if (pixelError || !pixel) {
+    // Verifica pixel
+    const pixelResult = await Database.query('SELECT id FROM pixels WHERE id = $1 AND workspace_id = $2 LIMIT 1', [pixelId, req.user!.workspaceId]);
+    const pixel = pixelResult.rows[0];
+    if (!pixel) {
       throw createError('Pixel not found', 404);
     }
-
     const conversionData = {
       id: uuidv4(),
       name,
@@ -113,22 +77,14 @@ export class ConversionController {
       total_conversions: 0,
       total_value: 0,
       average_value: 0,
-      is_active: true
+      is_active: true,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
     };
-
-    const { data: conversion, error } = await Database.query(`
-      INSERT INTO
-        conversions (id, name, pixel_id, event_name, rules, conversion_rate, total_conversions, total_value, average_value, is_active)
-      VALUES
-        (${conversionData.id}, ${name}, ${pixelId}, ${eventName}, ${rules}, ${conversionData.conversion_rate}, ${conversionData.total_conversions}, ${conversionData.total_value}, ${conversionData.average_value}, ${conversionData.is_active})
-      RETURNING *
-    `);
-
-    if (error) {
-      logger.error('Error creating conversion:', error);
-      throw createError('Failed to create conversion', 500);
-    }
-
+    const sql = `INSERT INTO conversions (id, name, pixel_id, event_name, rules, conversion_rate, total_conversions, total_value, average_value, is_active, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`;
+    const values = [conversionData.id, conversionData.name, conversionData.pixel_id, conversionData.event_name, JSON.stringify(conversionData.rules), conversionData.conversion_rate, conversionData.total_conversions, conversionData.total_value, conversionData.average_value, conversionData.is_active, conversionData.created_at, conversionData.updated_at];
+    const result = await Database.query(sql, values);
+    const conversion = result.rows[0];
     res.status(201).json({
       success: true,
       data: conversion
@@ -138,53 +94,24 @@ export class ConversionController {
   async updateConversion(req: AuthRequest, res: Response) {
     const { id } = req.params;
     const { name, eventName, rules, isActive } = req.body;
-
-    // Check if conversion exists and belongs to workspace
-    const { data: existingConversion, error: fetchError } = await Database.query(`
-      SELECT
-        *,
-        pixels!inner(workspace_id)
-      FROM
-        conversions
-      WHERE
-        id = ${id}
-        AND pixels.workspace_id = ${req.user!.workspaceId}
-      LIMIT
-        1
-    `);
-
-    if (fetchError || !existingConversion) {
+    // Verifica se existe e pertence ao workspace
+    const check = await Database.query('SELECT c.*, p.workspace_id FROM conversions c INNER JOIN pixels p ON c.pixel_id = p.id WHERE c.id = $1 AND p.workspace_id = $2 LIMIT 1', [id, req.user!.workspaceId]);
+    const existingConversion = check.rows[0];
+    if (!existingConversion) {
       throw createError('Conversion not found', 404);
     }
-
-    const updateData: any = {
-      updated_at: new Date().toISOString()
-    };
-
-    if (name !== undefined) updateData.name = name;
-    if (eventName !== undefined) updateData.event_name = eventName;
-    if (rules !== undefined) updateData.rules = rules;
-    if (isActive !== undefined) updateData.is_active = isActive;
-
-    const { data: conversion, error } = await Database.query(`
-      UPDATE
-        conversions
-      SET
-        name = ${name},
-        event_name = ${eventName},
-        rules = ${rules},
-        is_active = ${isActive},
-        updated_at = ${updateData.updated_at}
-      WHERE
-        id = ${id}
-      RETURNING *
-    `);
-
-    if (error) {
-      logger.error('Error updating conversion:', error);
-      throw createError('Failed to update conversion', 500);
-    }
-
+    const updateFields: string[] = [];
+    const params: any[] = [];
+    let paramIndex = 1;
+    if (name !== undefined) { updateFields.push(`name = $${paramIndex}`); params.push(name); paramIndex++; }
+    if (eventName !== undefined) { updateFields.push(`event_name = $${paramIndex}`); params.push(eventName); paramIndex++; }
+    if (rules !== undefined) { updateFields.push(`rules = $${paramIndex}`); params.push(JSON.stringify(rules)); paramIndex++; }
+    if (isActive !== undefined) { updateFields.push(`is_active = $${paramIndex}`); params.push(isActive); paramIndex++; }
+    updateFields.push(`updated_at = $${paramIndex}`); params.push(new Date().toISOString()); paramIndex++;
+    params.push(id);
+    const sql = `UPDATE conversions SET ${updateFields.join(', ')} WHERE id = $${paramIndex} RETURNING *`;
+    const result = await Database.query(sql, params);
+    const conversion = result.rows[0];
     res.json({
       success: true,
       data: conversion
@@ -193,37 +120,13 @@ export class ConversionController {
 
   async deleteConversion(req: AuthRequest, res: Response) {
     const { id } = req.params;
-
-    // Check if conversion exists and belongs to workspace
-    const { data: existingConversion, error: fetchError } = await Database.query(`
-      SELECT
-        name,
-        pixels!inner(workspace_id)
-      FROM
-        conversions
-      WHERE
-        id = ${id}
-        AND pixels.workspace_id = ${req.user!.workspaceId}
-      LIMIT
-        1
-    `);
-
-    if (fetchError || !existingConversion) {
+    // Verifica se existe e pertence ao workspace
+    const check = await Database.query('SELECT c.*, p.workspace_id FROM conversions c INNER JOIN pixels p ON c.pixel_id = p.id WHERE c.id = $1 AND p.workspace_id = $2 LIMIT 1', [id, req.user!.workspaceId]);
+    const existingConversion = check.rows[0];
+    if (!existingConversion) {
       throw createError('Conversion not found', 404);
     }
-
-    const { error } = await Database.query(`
-      DELETE FROM
-        conversions
-      WHERE
-        id = ${id}
-    `);
-
-    if (error) {
-      logger.error('Error deleting conversion:', error);
-      throw createError('Failed to delete conversion', 500);
-    }
-
+    await Database.query('DELETE FROM conversions WHERE id = $1', [id]);
     res.json({
       success: true,
       message: 'Conversion deleted successfully'
@@ -233,67 +136,25 @@ export class ConversionController {
   async getConversionAnalytics(req: AuthRequest, res: Response) {
     const { id } = req.params;
     const { timeframe = '7d' } = req.query;
-
-    // Check if conversion exists and belongs to workspace
-    const { data: conversion, error: conversionError } = await Database.query(`
-      SELECT
-        *,
-        pixels!inner(workspace_id)
-      FROM
-        conversions
-      WHERE
-        id = ${id}
-        AND pixels.workspace_id = ${req.user!.workspaceId}
-      LIMIT
-        1
-    `);
-
-    if (conversionError || !conversion) {
+    // Verifica se existe e pertence ao workspace
+    const check = await Database.query('SELECT c.*, p.workspace_id FROM conversions c INNER JOIN pixels p ON c.pixel_id = p.id WHERE c.id = $1 AND p.workspace_id = $2 LIMIT 1', [id, req.user!.workspaceId]);
+    const conversion = check.rows[0];
+    if (!conversion) {
       throw createError('Conversion not found', 404);
     }
-
-    // Calculate date range
+    // Datas
     const endDate = new Date();
     const startDate = new Date();
-    
     switch (timeframe) {
-      case '24h':
-        startDate.setDate(startDate.getDate() - 1);
-        break;
-      case '7d':
-        startDate.setDate(startDate.getDate() - 7);
-        break;
-      case '30d':
-        startDate.setDate(startDate.getDate() - 30);
-        break;
-      default:
-        startDate.setDate(startDate.getDate() - 7);
+      case '24h': startDate.setDate(startDate.getDate() - 1); break;
+      case '7d': startDate.setDate(startDate.getDate() - 7); break;
+      case '30d': startDate.setDate(startDate.getDate() - 30); break;
+      default: startDate.setDate(startDate.getDate() - 7);
     }
-
-    // Get conversion events
-    const { data: events, error: eventsError } = await Database.query(`
-      SELECT
-        timestamp,
-        parameters
-      FROM
-        events
-      WHERE
-        pixel_id = ${conversion.pixel_id}
-        AND event_name = ${conversion.event_name}
-        AND timestamp >= ${startDate.toISOString()}
-        AND timestamp <= ${endDate.toISOString()}
-      ORDER BY
-        timestamp ASC
-    `);
-
-    if (eventsError) {
-      logger.error('Error fetching conversion events:', eventsError);
-      throw createError('Failed to fetch analytics', 500);
-    }
-
-    // Process analytics
+    // Busca eventos
+    const eventsResult = await Database.query('SELECT timestamp, parameters FROM events WHERE pixel_id = $1 AND event_name = $2 AND timestamp >= $3 AND timestamp <= $4 ORDER BY timestamp ASC', [conversion.pixel_id, conversion.event_name, startDate.toISOString(), endDate.toISOString()]);
+    const events = eventsResult.rows;
     const analytics = this.processConversionAnalytics(events || [], conversion.rules);
-
     res.json({
       success: true,
       data: analytics
@@ -303,64 +164,24 @@ export class ConversionController {
   async getConversionFunnel(req: AuthRequest, res: Response) {
     const { id } = req.params;
     const { timeframe = '7d' } = req.query;
-
-    // Check if conversion exists and belongs to workspace
-    const { data: conversion, error: conversionError } = await Database.query(`
-      SELECT
-        *,
-        pixels!inner(workspace_id)
-      FROM
-        conversions
-      WHERE
-        id = ${id}
-        AND pixels.workspace_id = ${req.user!.workspaceId}
-      LIMIT
-        1
-    `);
-
-    if (conversionError || !conversion) {
+    // Verifica se existe e pertence ao workspace
+    const check = await Database.query('SELECT c.*, p.workspace_id FROM conversions c INNER JOIN pixels p ON c.pixel_id = p.id WHERE c.id = $1 AND p.workspace_id = $2 LIMIT 1', [id, req.user!.workspaceId]);
+    const conversion = check.rows[0];
+    if (!conversion) {
       throw createError('Conversion not found', 404);
     }
-
-    // Calculate date range
+    // Datas
     const endDate = new Date();
     const startDate = new Date();
-    
     switch (timeframe) {
-      case '24h':
-        startDate.setDate(startDate.getDate() - 1);
-        break;
-      case '7d':
-        startDate.setDate(startDate.getDate() - 7);
-        break;
-      case '30d':
-        startDate.setDate(startDate.getDate() - 30);
-        break;
-      default:
-        startDate.setDate(startDate.getDate() - 7);
+      case '24h': startDate.setDate(startDate.getDate() - 1); break;
+      case '7d': startDate.setDate(startDate.getDate() - 7); break;
+      case '30d': startDate.setDate(startDate.getDate() - 30); break;
+      default: startDate.setDate(startDate.getDate() - 7);
     }
-
-    // Get all events for funnel analysis
-    const { data: events, error: eventsError } = await Database.query(`
-      SELECT
-        event_name,
-        timestamp,
-        parameters
-      FROM
-        events
-      WHERE
-        pixel_id = ${conversion.pixel_id}
-        AND timestamp >= ${startDate.toISOString()}
-        AND timestamp <= ${endDate.toISOString()}
-      ORDER BY
-        timestamp ASC
-    `);
-
-    if (eventsError) {
-      logger.error('Error fetching funnel events:', eventsError);
-      throw createError('Failed to fetch funnel data', 500);
-    }
-
+    // Busca eventos
+    const eventsResult = await Database.query('SELECT event_name, timestamp, parameters FROM events WHERE pixel_id = $1 AND timestamp >= $2 AND timestamp <= $3 ORDER BY timestamp ASC', [conversion.pixel_id, startDate.toISOString(), endDate.toISOString()]);
+    const events = eventsResult.rows;
     // Build funnel steps
     const funnelSteps = [
       { name: 'Visitors', eventName: 'PageView', count: 0 },
@@ -369,30 +190,25 @@ export class ConversionController {
       { name: 'Initiate Checkout', eventName: 'InitiateCheckout', count: 0 },
       { name: 'Purchase', eventName: 'Purchase', count: 0 }
     ];
-
     // Count events for each step
     const eventCounts: { [key: string]: number } = {};
-    events?.forEach(event => {
+    events?.forEach((event: any) => {
       eventCounts[event.event_name] = (eventCounts[event.event_name] || 0) + 1;
     });
-
-    funnelSteps.forEach(step => {
+    funnelSteps.forEach((step: any) => {
       step.count = eventCounts[step.eventName] || 0;
     });
-
     // Calculate conversion rates
-    const funnelWithRates = funnelSteps.map((step, index) => {
+    const funnelWithRates = funnelSteps.map((step: any, index: number) => {
       const previousStep = index > 0 ? funnelSteps[index - 1] : null;
       const conversionRate = previousStep && previousStep.count > 0 
         ? (step.count / previousStep.count) * 100 
         : 100;
-
       return {
         ...step,
         conversionRate: Math.round(conversionRate * 100) / 100
       };
     });
-
     res.json({
       success: true,
       data: {

@@ -8,53 +8,50 @@ export class UserController {
   async getUsers(req: AuthRequest, res: Response) {
     const { page = 1, limit = 20, search, role, sortBy = 'created_at', sortOrder = 'desc' } = req.query;
     const offset = (Number(page) - 1) * Number(limit);
-
-    let query = Database.query
-      .select('id, name, email, role, avatar, is_active, last_login, created_at', { count: 'exact' })
-      .eq('workspace_id', req.user!.workspaceId)
-      .range(offset, offset + Number(limit) - 1)
-      .order(sortBy as string, { ascending: sortOrder === 'asc' });
-
+    let baseQuery = 'SELECT id, name, email, role, avatar, is_active, last_login, created_at FROM users WHERE workspace_id = $1';
+    let params: any[] = [req.user!.workspaceId];
+    let countQuery = 'SELECT COUNT(*) FROM users WHERE workspace_id = $1';
+    let countParams: any[] = [req.user!.workspaceId];
     if (search) {
-      query = query.or(`name.ilike.%${search}%,email.ilike.%${search}%`);
+      baseQuery += ' AND (name ILIKE $2 OR email ILIKE $2)';
+      countQuery += ' AND (name ILIKE $2 OR email ILIKE $2)';
+      params.push(`%${search}%`);
+      countParams.push(`%${search}%`);
     }
-
     if (role) {
-      query = query.eq('role', role);
+      baseQuery += ` AND role = $${params.length + 1}`;
+      countQuery += ` AND role = $${countParams.length + 1}`;
+      params.push(role);
+      countParams.push(role);
     }
-
-    const { data: users, error, count } = await query;
-
-    if (error) {
-      logger.error('Error fetching users:', error);
-      throw createError('Failed to fetch users', 500);
-    }
-
+    baseQuery += ` ORDER BY ${sortBy} ${sortOrder === 'asc' ? 'ASC' : 'DESC'} LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+    params.push(limit, offset);
+    const usersResult = await Database.query(baseQuery, params);
+    const countResult = await Database.query(countQuery, countParams);
+    const users = usersResult.rows;
+    const count = parseInt(countResult.rows[0].count, 10);
     res.json({
       success: true,
       data: users,
       pagination: {
         page: Number(page),
         limit: Number(limit),
-        total: count || 0,
-        totalPages: Math.ceil((count || 0) / Number(limit))
+        total: count,
+        totalPages: Math.ceil(count / Number(limit))
       }
     });
   }
 
   async getUserById(req: AuthRequest, res: Response) {
     const { id } = req.params;
-
-    const { data: user, error } = await Database.query
-      .select('id, name, email, role, avatar, is_active, last_login, created_at')
-      .eq('id', id)
-      .eq('workspace_id', req.user!.workspaceId)
-      .single();
-
-    if (error || !user) {
+    const result = await Database.query(
+      'SELECT id, name, email, role, avatar, is_active, last_login, created_at FROM users WHERE id = $1 AND workspace_id = $2 LIMIT 1',
+      [id, req.user!.workspaceId]
+    );
+    const user = result.rows[0];
+    if (!user) {
       throw createError('User not found', 404);
     }
-
     res.json({
       success: true,
       data: user
@@ -64,50 +61,30 @@ export class UserController {
   async updateUser(req: AuthRequest, res: Response) {
     const { id } = req.params;
     const { name, role, isActive } = req.body;
-
     // Check if user exists and belongs to workspace
-    const { data: existingUser, error: fetchError } = await Database.query
-      .select('*')
-      .eq('id', id)
-      .eq('workspace_id', req.user!.workspaceId)
-      .single();
-
-    if (fetchError || !existingUser) {
+    const existingResult = await Database.query(
+      'SELECT * FROM users WHERE id = $1 AND workspace_id = $2 LIMIT 1',
+      [id, req.user!.workspaceId]
+    );
+    if (existingResult.rows.length === 0) {
       throw createError('User not found', 404);
     }
-
     // Prevent self-demotion from admin
     if (id === req.user!.id && role && role !== 'admin') {
       throw createError('Cannot change your own admin role', 400);
     }
-
-    const updateData: any = {
-      updated_at: new Date().toISOString()
-    };
-
-    if (name !== undefined) updateData.name = name;
-    if (role !== undefined) updateData.role = role;
-    if (isActive !== undefined) updateData.is_active = isActive;
-
-    const { data: user, error } = await Database.query
-      .update(updateData)
-      .eq('id', id)
-      .select('id, name, email, role, avatar, is_active, last_login, created_at')
-      .single();
-
-    if (error) {
-      logger.error('Error updating user:', error);
-      throw createError('Failed to update user', 500);
-    }
-
+    const updateResult = await Database.query(
+      'UPDATE users SET name = $1, role = $2, is_active = $3, updated_at = $4 WHERE id = $5 RETURNING id, name, email, role, avatar, is_active, last_login, created_at',
+      [name, role, isActive, new Date().toISOString(), id]
+    );
+    const user = updateResult.rows[0];
     // Update workspace member role if changed
     if (role !== undefined) {
-      await Database.query
-        .update({ role })
-        .eq('user_id', id)
-        .eq('workspace_id', req.user!.workspaceId);
+      await Database.query(
+        'UPDATE workspace_members SET role = $1 WHERE user_id = $2 AND workspace_id = $3',
+        [role, id, req.user!.workspaceId]
+      );
     }
-
     res.json({
       success: true,
       data: user
@@ -116,42 +93,28 @@ export class UserController {
 
   async deleteUser(req: AuthRequest, res: Response) {
     const { id } = req.params;
-
     // Prevent self-deletion
     if (id === req.user!.id) {
       throw createError('Cannot delete your own account', 400);
     }
-
     // Check if user exists and belongs to workspace
-    const { data: existingUser, error: fetchError } = await Database.query
-      .select('name')
-      .eq('id', id)
-      .eq('workspace_id', req.user!.workspaceId)
-      .single();
-
-    if (fetchError || !existingUser) {
+    const existingResult = await Database.query(
+      'SELECT name FROM users WHERE id = $1 AND workspace_id = $2 LIMIT 1',
+      [id, req.user!.workspaceId]
+    );
+    if (existingResult.rows.length === 0) {
       throw createError('User not found', 404);
     }
-
     // Remove from workspace members
-    await Database.query
-      .delete()
-      .eq('user_id', id)
-      .eq('workspace_id', req.user!.workspaceId);
-
+    await Database.query(
+      'DELETE FROM workspace_members WHERE user_id = $1 AND workspace_id = $2',
+      [id, req.user!.workspaceId]
+    );
     // Deactivate user instead of deleting
-    const { error } = await Database.query
-      .update({ 
-        is_active: false,
-        updated_at: new Date().toISOString()
-      })
-      .eq('id', id);
-
-    if (error) {
-      logger.error('Error deleting user:', error);
-      throw createError('Failed to delete user', 500);
-    }
-
+    await Database.query(
+      'UPDATE users SET is_active = false, updated_at = $1 WHERE id = $2',
+      [new Date().toISOString(), id]
+    );
     res.json({
       success: true,
       message: 'User deleted successfully'
@@ -162,38 +125,32 @@ export class UserController {
     const { id } = req.params;
     const { page = 1, limit = 20 } = req.query;
     const offset = (Number(page) - 1) * Number(limit);
-
     // Check if user exists and belongs to workspace
-    const { data: user, error: userError } = await Database.query
-      .select('id')
-      .eq('id', id)
-      .eq('workspace_id', req.user!.workspaceId)
-      .single();
-
-    if (userError || !user) {
+    const userResult = await Database.query(
+      'SELECT id FROM users WHERE id = $1 AND workspace_id = $2 LIMIT 1',
+      [id, req.user!.workspaceId]
+    );
+    if (userResult.rows.length === 0) {
       throw createError('User not found', 404);
     }
-
-    const { data: activities, error, count } = await Database.query
-      .select('*', { count: 'exact' })
-      .eq('user_id', id)
-      .eq('workspace_id', req.user!.workspaceId)
-      .range(offset, offset + Number(limit) - 1)
-      .order('created_at', { ascending: false });
-
-    if (error) {
-      logger.error('Error fetching user activity:', error);
-      throw createError('Failed to fetch user activity', 500);
-    }
-
+    const activitiesResult = await Database.query(
+      'SELECT * FROM audit_logs WHERE user_id = $1 AND workspace_id = $2 ORDER BY created_at DESC LIMIT $3 OFFSET $4',
+      [id, req.user!.workspaceId, limit, offset]
+    );
+    const countResult = await Database.query(
+      'SELECT COUNT(*) FROM audit_logs WHERE user_id = $1 AND workspace_id = $2',
+      [id, req.user!.workspaceId]
+    );
+    const activities = activitiesResult.rows;
+    const count = parseInt(countResult.rows[0].count, 10);
     res.json({
       success: true,
       data: activities,
       pagination: {
         page: Number(page),
         limit: Number(limit),
-        total: count || 0,
-        totalPages: Math.ceil((count || 0) / Number(limit))
+        total: count,
+        totalPages: Math.ceil(count / Number(limit))
       }
     });
   }

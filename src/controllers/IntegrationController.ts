@@ -9,59 +9,50 @@ export class IntegrationController {
   async getIntegrations(req: AuthRequest, res: Response) {
     const { page = 1, limit = 20, search, type, status, sortBy = 'created_at', sortOrder = 'desc' } = req.query;
     const offset = (Number(page) - 1) * Number(limit);
-
-    let query = Database.query
-      .select('*', { count: 'exact' })
-      .from('integrations')
-      .eq('workspace_id', req.user!.workspaceId)
-      .range(offset, offset + Number(limit) - 1)
-      .order(sortBy as string, { ascending: sortOrder === 'asc' });
-
+    let whereClauses: string[] = ['workspace_id = $1'];
+    let params: any[] = [req.user!.workspaceId];
+    let paramIndex = 2;
     if (search) {
-      query = query.or(`name.ilike.%${search}%,description.ilike.%${search}%`);
+      whereClauses.push('(name ILIKE $' + paramIndex + ' OR description ILIKE $' + (paramIndex + 1) + ')');
+      params.push(`%${search}%`, `%${search}%`);
+      paramIndex += 2;
     }
-
     if (type) {
-      query = query.eq('type', type);
+      whereClauses.push('type = $' + paramIndex);
+      params.push(type);
+      paramIndex++;
     }
-
     if (status) {
-      query = query.eq('status', status);
+      whereClauses.push('status = $' + paramIndex);
+      params.push(status);
+      paramIndex++;
     }
-
-    const { data: integrations, error, count } = await query;
-
-    if (error) {
-      logger.error('Error fetching integrations:', error);
-      throw createError('Failed to fetch integrations', 500);
-    }
-
+    const where = whereClauses.length > 0 ? 'WHERE ' + whereClauses.join(' AND ') : '';
+    const sql = `SELECT *, count(*) OVER() AS total_count FROM integrations ${where} ORDER BY ${sortBy} ${sortOrder === 'asc' ? 'ASC' : 'DESC'} LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+    params.push(Number(limit), offset);
+    const result = await Database.query(sql, params);
+    const integrations = result.rows;
+    const total = integrations.length > 0 ? Number(integrations[0].total_count) : 0;
     res.json({
       success: true,
       data: integrations,
       pagination: {
         page: Number(page),
         limit: Number(limit),
-        total: count || 0,
-        totalPages: Math.ceil((count || 0) / Number(limit))
+        total,
+        totalPages: Math.ceil(total / Number(limit))
       }
     });
   }
 
   async getIntegrationById(req: AuthRequest, res: Response) {
     const { id } = req.params;
-
-    const { data: integration, error } = await Database.query
-      .select('*')
-      .from('integrations')
-      .eq('id', id)
-      .eq('workspace_id', req.user!.workspaceId)
-      .single();
-
-    if (error || !integration) {
+    const sql = 'SELECT * FROM integrations WHERE id = $1 AND workspace_id = $2 LIMIT 1';
+    const result = await Database.query(sql, [id, req.user!.workspaceId]);
+    const integration = result.rows[0];
+    if (!integration) {
       throw createError('Integration not found', 404);
     }
-
     res.json({
       success: true,
       data: integration
@@ -70,13 +61,10 @@ export class IntegrationController {
 
   async createIntegration(req: AuthRequest, res: Response) {
     const { type, name, description, config } = req.body;
-
-    // Validate integration type
     const validTypes = ['gtm', 'wordpress', 'shopify', 'webhook'];
     if (!validTypes.includes(type)) {
       throw createError('Invalid integration type', 400);
     }
-
     const integrationData = {
       id: uuidv4(),
       workspace_id: req.user!.workspaceId,
@@ -85,20 +73,14 @@ export class IntegrationController {
       description: description || '',
       config: config || {},
       status: 'inactive',
-      pixels_connected: 0
+      pixels_connected: 0,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
     };
-
-    const { data: integration, error } = await Database.query
-      .insert(integrationData)
-      .from('integrations')
-      .select()
-      .single();
-
-    if (error) {
-      logger.error('Error creating integration:', error);
-      throw createError('Failed to create integration', 500);
-    }
-
+    const sql = `INSERT INTO integrations (id, workspace_id, type, name, description, config, status, pixels_connected, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`;
+    const values = [integrationData.id, integrationData.workspace_id, integrationData.type, integrationData.name, integrationData.description, integrationData.config, integrationData.status, integrationData.pixels_connected, integrationData.created_at, integrationData.updated_at];
+    const result = await Database.query(sql, values);
+    const integration = result.rows[0];
     res.status(201).json({
       success: true,
       data: integration
@@ -108,40 +90,23 @@ export class IntegrationController {
   async updateIntegration(req: AuthRequest, res: Response) {
     const { id } = req.params;
     const { name, description, config, status } = req.body;
-
-    // Check if integration exists and belongs to workspace
-    const { data: existingIntegration, error: fetchError } = await Database.query
-      .select('*')
-      .from('integrations')
-      .eq('id', id)
-      .eq('workspace_id', req.user!.workspaceId)
-      .single();
-
-    if (fetchError || !existingIntegration) {
+    // Verifica se existe
+    const check = await Database.query('SELECT * FROM integrations WHERE id = $1 AND workspace_id = $2', [id, req.user!.workspaceId]);
+    if (check.rows.length === 0) {
       throw createError('Integration not found', 404);
     }
-
-    const updateData: any = {
-      updated_at: new Date().toISOString()
-    };
-
-    if (name !== undefined) updateData.name = name;
-    if (description !== undefined) updateData.description = description;
-    if (config !== undefined) updateData.config = config;
-    if (status !== undefined) updateData.status = status;
-
-    const { data: integration, error } = await Database.query
-      .update(updateData)
-      .from('integrations')
-      .eq('id', id)
-      .select()
-      .single();
-
-    if (error) {
-      logger.error('Error updating integration:', error);
-      throw createError('Failed to update integration', 500);
-    }
-
+    const updateFields: string[] = [];
+    const params: any[] = [];
+    let paramIndex = 1;
+    if (name !== undefined) { updateFields.push(`name = $${paramIndex}`); params.push(name); paramIndex++; }
+    if (description !== undefined) { updateFields.push(`description = $${paramIndex}`); params.push(description); paramIndex++; }
+    if (config !== undefined) { updateFields.push(`config = $${paramIndex}`); params.push(config); paramIndex++; }
+    if (status !== undefined) { updateFields.push(`status = $${paramIndex}`); params.push(status); paramIndex++; }
+    updateFields.push(`updated_at = $${paramIndex}`); params.push(new Date().toISOString()); paramIndex++;
+    params.push(id, req.user!.workspaceId);
+    const sql = `UPDATE integrations SET ${updateFields.join(', ')} WHERE id = $${paramIndex} AND workspace_id = $${paramIndex + 1} RETURNING *`;
+    const result = await Database.query(sql, params);
+    const integration = result.rows[0];
     res.json({
       success: true,
       data: integration
@@ -150,29 +115,12 @@ export class IntegrationController {
 
   async deleteIntegration(req: AuthRequest, res: Response) {
     const { id } = req.params;
-
-    // Check if integration exists and belongs to workspace
-    const { data: existingIntegration, error: fetchError } = await Database.query
-      .select('name')
-      .from('integrations')
-      .eq('id', id)
-      .eq('workspace_id', req.user!.workspaceId)
-      .single();
-
-    if (fetchError || !existingIntegration) {
+    // Verifica se existe
+    const check = await Database.query('SELECT name FROM integrations WHERE id = $1 AND workspace_id = $2', [id, req.user!.workspaceId]);
+    if (check.rows.length === 0) {
       throw createError('Integration not found', 404);
     }
-
-    const { error } = await Database.query
-      .delete()
-      .from('integrations')
-      .eq('id', id);
-
-    if (error) {
-      logger.error('Error deleting integration:', error);
-      throw createError('Failed to delete integration', 500);
-    }
-
+    await Database.query('DELETE FROM integrations WHERE id = $1 AND workspace_id = $2', [id, req.user!.workspaceId]);
     res.json({
       success: true,
       message: 'Integration deleted successfully'
@@ -181,31 +129,13 @@ export class IntegrationController {
 
   async testIntegration(req: AuthRequest, res: Response) {
     const { id } = req.params;
-
-    // Check if integration exists and belongs to workspace
-    const { data: integration, error: fetchError } = await Database.query
-      .select('*')
-      .from('integrations')
-      .eq('id', id)
-      .eq('workspace_id', req.user!.workspaceId)
-      .single();
-
-    if (fetchError || !integration) {
+    const result = await Database.query('SELECT * FROM integrations WHERE id = $1 AND workspace_id = $2', [id, req.user!.workspaceId]);
+    const integration = result.rows[0];
+    if (!integration) {
       throw createError('Integration not found', 404);
     }
-
-    // Perform integration-specific test
     const testResult = await this.performIntegrationTest(integration);
-
-    // Update integration status based on test result
-    await Database.query
-      .update({
-        status: testResult.success ? 'active' : 'error',
-        last_sync: new Date().toISOString()
-      })
-      .from('integrations')
-      .eq('id', id);
-
+    await Database.query('UPDATE integrations SET status = $1, last_sync = $2 WHERE id = $3', [testResult.success ? 'active' : 'error', new Date().toISOString(), id]);
     res.json({
       success: true,
       data: testResult
@@ -214,32 +144,13 @@ export class IntegrationController {
 
   async syncIntegration(req: AuthRequest, res: Response) {
     const { id } = req.params;
-
-    // Check if integration exists and belongs to workspace
-    const { data: integration, error: fetchError } = await Database.query
-      .select('*')
-      .from('integrations')
-      .eq('id', id)
-      .eq('workspace_id', req.user!.workspaceId)
-      .single();
-
-    if (fetchError || !integration) {
+    const result = await Database.query('SELECT * FROM integrations WHERE id = $1 AND workspace_id = $2', [id, req.user!.workspaceId]);
+    const integration = result.rows[0];
+    if (!integration) {
       throw createError('Integration not found', 404);
     }
-
-    // Perform integration-specific sync
     const syncResult = await this.performIntegrationSync(integration);
-
-    // Update integration with sync results
-    await Database.query
-      .update({
-        status: syncResult.success ? 'active' : 'error',
-        last_sync: new Date().toISOString(),
-        pixels_connected: syncResult.pixelsConnected || integration.pixels_connected
-      })
-      .from('integrations')
-      .eq('id', id);
-
+    await Database.query('UPDATE integrations SET status = $1, last_sync = $2, pixels_connected = $3 WHERE id = $4', [syncResult.success ? 'active' : 'error', new Date().toISOString(), syncResult.pixelsConnected || integration.pixels_connected, id]);
     res.json({
       success: true,
       data: syncResult
@@ -267,7 +178,7 @@ export class IntegrationController {
       logger.error(`Integration test failed for ${integration.type}:`, error);
       return {
         success: false,
-        message: error.message || 'Test failed'
+        message: typeof error === 'object' && error && 'message' in error ? (error as any).message : 'Test failed'
       };
     }
   }
@@ -293,7 +204,7 @@ export class IntegrationController {
       logger.error(`Integration sync failed for ${integration.type}:`, error);
       return {
         success: false,
-        message: error.message || 'Sync failed'
+        message: typeof error === 'object' && error && 'message' in error ? (error as any).message : 'Sync failed'
       };
     }
   }

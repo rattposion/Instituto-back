@@ -9,7 +9,7 @@ const rateLimiter = new RateLimiterMemory({
 
 export const rateLimiterMiddleware = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    await rateLimiter.consume(req.ip);
+    await rateLimiter.consume(req.ip || '');
     next();
   } catch (rejRes: any) {
     const remainingPoints = rejRes?.remainingPoints || 0;
