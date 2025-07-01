@@ -1,0 +1,4 @@
+{"level":"info","message":"Conexão com o banco de dados estabelecida","service":"meta-pixel-backend","timestamp":"2025-07-01T13:39:46.381Z"}
+{"level":"info","message":"Cron jobs started","service":"meta-pixel-backend","timestamp":"2025-07-01T13:39:46.389Z"}
+{"level":"info","message":"Server running on port 3001","service":"meta-pixel-backend","timestamp":"2025-07-01T13:39:46.391Z"}
+{"level":"info","message":"Environment: development","service":"meta-pixel-backend","timestamp":"2025-07-01T13:39:46.392Z"}
