@@ -25,7 +25,20 @@ async function runMigrations() {
       const migrationSQL = fs.readFileSync(migrationPath, 'utf8');
       
       // Execute migration
-      const { error } = await prisma.$executeRaw`EXECUTE ${migrationSQL}`;
-      
-      if (error) {
-        logger.error(`
+      await prisma.$executeRawUnsafe(migrationSQL);
+      logger.info(`Migration ${file} completed successfully`);
+    }
+
+    logger.info('All migrations completed successfully');
+  } catch (error) {
+    logger.error('Migration failed:', error);
+    process.exit(1);
+  }
+}
+
+// Run migrations if called directly
+if (require.main === module) {
+  runMigrations();
+}
+
+export { runMigrations };
