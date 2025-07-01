@@ -22,3 +22,6 @@ RUN mkdir -p logs
 
 # Start the application
 CMD ["npm", "start"]
+
+# Expor a porta esperada pelo Railway
+EXPOSE 8080
