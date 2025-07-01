@@ -1,5 +1,5 @@
 import { Response } from 'express';
-import { prisma } from '../config/database';
+import { supabase } from '../config/database';
 import { AuthRequest } from '../middleware/auth';
 import { createError } from '../middleware/errorHandler';
 import { logger } from '../utils/logger';
@@ -30,79 +30,45 @@ export class AnalyticsController {
       // Get all data in parallel
       const [pixelsResult, eventsResult, conversionsResult, diagnosticsResult] = await Promise.all([
         // Pixels data
-        prisma.pixels.findMany({
-          select: {
-            id: true,
-            status: true,
-            events_count: true,
-            conversions_count: true,
-            revenue: true
-          },
-          where: {
-            workspace_id: req.user!.workspaceId
-          }
-        }),
+        supabase
+          .from('pixels')
+          .select('id, status, events_count, conversions_count, revenue')
+          .eq('workspace_id', req.user!.workspaceId),
         
         // Events data
-        prisma.events.findMany({
-          select: {
-            event_name: true,
-            timestamp: true,
-            parameters: true,
-            processed: true,
-            pixels: {
-              select: {
-                workspace_id: true
-              }
-            }
-          },
-          where: {
-            AND: [
-              { pixels: { workspace_id: req.user!.workspaceId } },
-              { timestamp: { gte: startDate.toISOString() } },
-              { timestamp: { lte: endDate.toISOString() } }
-            ]
-          }
-        }),
+        supabase
+          .from('events')
+          .select(`
+            event_name, timestamp, parameters, processed,
+            pixels!inner(workspace_id)
+          `)
+          .eq('pixels.workspace_id', req.user!.workspaceId)
+          .gte('timestamp', startDate.toISOString())
+          .lte('timestamp', endDate.toISOString()),
         
         // Conversions data
-        prisma.conversions.findMany({
-          select: {
-            total_conversions: true,
-            total_value: true,
-            conversion_rate: true,
-            pixels: {
-              select: {
-                workspace_id: true
-              }
-            }
-          },
-          where: {
-            pixels: { workspace_id: req.user!.workspaceId }
-          }
-        }),
+        supabase
+          .from('conversions')
+          .select(`
+            total_conversions, total_value, conversion_rate,
+            pixels!inner(workspace_id)
+          `)
+          .eq('pixels.workspace_id', req.user!.workspaceId),
         
         // Diagnostics data
-        prisma.diagnostics.findMany({
-          select: {
-            severity: true,
-            status: true,
-            pixels: {
-              select: {
-                workspace_id: true
-              }
-            }
-          },
-          where: {
-            pixels: { workspace_id: req.user!.workspaceId }
-          }
-        })
+        supabase
+          .from('diagnostics')
+          .select(`
+            severity, status,
+            pixels!inner(workspace_id)
+          `)
+          .eq('pixels.workspace_id', req.user!.workspaceId)
       ]);
 
-      const pixels = pixelsResult;
-      const events = eventsResult;
-      const conversions = conversionsResult;
-      const diagnostics = diagnosticsResult;
+      const pixels = pixelsResult.data || [];
+      const events = eventsResult.data || [];
+      const conversions = conversionsResult.data || [];
+      const diagnostics = diagnosticsResult.data || [];
 
       // Process analytics
       const analytics = {
@@ -150,37 +116,25 @@ export class AnalyticsController {
   async getWorkspaceOverview(req: AuthRequest, res: Response) {
     try {
       const [pixelsResult, membersResult, integrationsResult] = await Promise.all([
-        prisma.pixels.findMany({
-          select: {
-            status: true
-          },
-          where: {
-            workspace_id: req.user!.workspaceId
-          }
-        }),
+        supabase
+          .from('pixels')
+          .select('status')
+          .eq('workspace_id', req.user!.workspaceId),
         
-        prisma.workspace_members.findMany({
-          select: {
-            role: true
-          },
-          where: {
-            workspace_id: req.user!.workspaceId
-          }
-        }),
+        supabase
+          .from('workspace_members')
+          .select('role')
+          .eq('workspace_id', req.user!.workspaceId),
         
-        prisma.integrations.findMany({
-          select: {
-            status: true
-          },
-          where: {
-            workspace_id: req.user!.workspaceId
-          }
-        })
+        supabase
+          .from('integrations')
+          .select('status')
+          .eq('workspace_id', req.user!.workspaceId)
       ]);
 
-      const pixels = pixelsResult;
-      const members = membersResult;
-      const integrations = integrationsResult;
+      const pixels = pixelsResult.data || [];
+      const members = membersResult.data || [];
+      const integrations = integrationsResult.data || [];
 
       const overview = {
         pixels: {
@@ -238,53 +192,46 @@ export class AnalyticsController {
     }
 
     try {
-      let query = prisma.events.findMany({
-        select: {
-          event_name: true,
-          timestamp: true,
-          parameters: true,
-          processed: true,
-          error_message: true,
-          pixels: {
-            select: {
-              workspace_id: true
-            }
-          }
-        },
-        where: {
-          AND: [
-            { pixels: { workspace_id: req.user!.workspaceId } },
-            { timestamp: { gte: startDate.toISOString() } },
-            { timestamp: { lte: endDate.toISOString() } }
-          ]
-        }
-      });
+      let query = supabase
+        .from('events')
+        .select(`
+          event_name, timestamp, parameters, processed, error_message,
+          pixels!inner(workspace_id)
+        `)
+        .eq('pixels.workspace_id', req.user!.workspaceId)
+        .gte('timestamp', startDate.toISOString())
+        .lte('timestamp', endDate.toISOString());
 
       if (pixelId) {
-        query = query.where({ pixel_id: pixelId });
+        query = query.eq('pixel_id', pixelId);
       }
 
       if (eventName) {
-        query = query.where({ event_name: eventName });
+        query = query.eq('event_name', eventName);
       }
 
-      const events = await query;
+      const { data: events, error } = await query;
+
+      if (error) {
+        logger.error('Error fetching events analytics:', error);
+        throw createError('Failed to fetch events analytics', 500);
+      }
 
       const analytics = {
         summary: {
-          totalEvents: events.length,
-          processedEvents: events.filter(e => e.processed).length,
-          failedEvents: events.filter(e => e.error_message).length,
-          successRate: events.length > 0 
+          totalEvents: events?.length || 0,
+          processedEvents: events?.filter(e => e.processed).length || 0,
+          failedEvents: events?.filter(e => e.error_message).length || 0,
+          successRate: events?.length > 0 
             ? (events.filter(e => e.processed && !e.error_message).length / events.length) * 100 
             : 0
         },
         trends: {
-          eventsByHour: this.groupEventsByHour(events),
-          eventsByDay: this.groupEventsByDay(events),
-          eventsByType: this.groupEventsByType(events)
+          eventsByHour: this.groupEventsByHour(events || []),
+          eventsByDay: this.groupEventsByDay(events || []),
+          eventsByType: this.groupEventsByType(events || [])
         },
-        topEvents: Object.entries(this.groupEventsByType(events))
+        topEvents: Object.entries(this.groupEventsByType(events || []))
           .sort(([,a], [,b]) => b - a)
           .slice(0, 10)
           .map(([name, count]) => ({ name, count }))
@@ -304,43 +251,35 @@ export class AnalyticsController {
     const { timeframe = '7d' } = req.query;
 
     try {
-      const conversions = await prisma.conversion.findMany({
-        select: {
-          id: true,
-          name: true,
-          total_conversions: true,
-          total_value: true,
-          conversion_rate: true,
-          is_active: true,
-          pixel: {
-            select: {
-              workspace_id: true
-            }
-          }
-        },
-        where: {
-          pixel: {
-            workspace_id: req.user!.workspaceId
-          }
-        }
-      });
+      const { data: conversions, error } = await supabase
+        .from('conversions')
+        .select(`
+          *,
+          pixels!inner(workspace_id)
+        `)
+        .eq('pixels.workspace_id', req.user!.workspaceId);
+
+      if (error) {
+        logger.error('Error fetching conversions analytics:', error);
+        throw createError('Failed to fetch conversions analytics', 500);
+      }
 
       const analytics = {
         summary: {
-          totalConversions: conversions?.reduce((sum, c) => sum + (c.total_conversions || 0), 0) || 0,
-          totalValue: conversions?.reduce((sum, c) => sum + parseFloat(c.total_value as any || 0), 0) || 0,
+          totalConversions: conversions?.reduce((sum, c) => sum + c.total_conversions, 0) || 0,
+          totalValue: conversions?.reduce((sum, c) => sum + parseFloat(c.total_value || 0), 0) || 0,
           averageValue: conversions?.length > 0 
-            ? conversions.reduce((sum, c) => sum + parseFloat(c.average_value as any || 0), 0) / conversions.length 
+            ? conversions.reduce((sum, c) => sum + parseFloat(c.average_value || 0), 0) / conversions.length 
             : 0,
           averageRate: conversions?.length > 0 
-            ? conversions.reduce((sum, c) => sum + (c.conversion_rate || 0), 0) / conversions.length 
+            ? conversions.reduce((sum, c) => sum + c.conversion_rate, 0) / conversions.length 
             : 0
         },
         byConversion: conversions?.map(c => ({
           id: c.id,
           name: c.name,
           totalConversions: c.total_conversions,
-          totalValue: parseFloat(c.total_value as any || 0),
+          totalValue: parseFloat(c.total_value || 0),
           conversionRate: c.conversion_rate,
           isActive: c.is_active
         })) || []

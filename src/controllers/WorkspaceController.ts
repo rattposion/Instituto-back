@@ -1,5 +1,5 @@
 import { Response } from 'express';
-import { prisma } from '../config/database';
+import { supabase } from '../config/database';
 import { AuthRequest } from '../middleware/auth';
 import { createError } from '../middleware/errorHandler';
 import { logger } from '../utils/logger';
@@ -10,55 +10,18 @@ export class WorkspaceController {
     const { page = 1, limit = 20, search } = req.query;
     const offset = (Number(page) - 1) * Number(limit);
 
-    let query = prisma.workspaceMember.findMany({
-      select: {
-        workspaces: {
-          select: {
-            id: true,
-            name: true,
-            slug: true,
-            description: true,
-            is_active: true,
-            created_at: true
-          }
-        },
-        role: true
-      },
-      where: {
-        userId: req.user!.id
-      },
-      skip: offset,
-      take: Number(limit),
-      orderBy: {
-        created_at: 'desc'
-      }
-    });
+    let query = supabase
+      .from('workspace_members')
+      .select(`
+        workspaces!inner(id, name, slug, description, is_active, created_at),
+        role
+      `, { count: 'exact' })
+      .eq('user_id', req.user!.id)
+      .range(offset, offset + Number(limit) - 1)
+      .order('created_at', { ascending: false });
 
     if (search) {
-      query = prisma.workspaceMember.findMany({
-        select: {
-          workspaces: {
-            select: {
-              name: true
-            },
-            where: {
-              name: {
-                contains: search,
-                mode: 'insensitive'
-              }
-            }
-          },
-          role: true
-        },
-        where: {
-          userId: req.user!.id
-        },
-        skip: offset,
-        take: Number(limit),
-        orderBy: {
-          created_at: 'desc'
-        }
-      });
+      query = query.ilike('workspaces.name', `%${search}%`);
     }
 
     const { data: workspaceMembers, error, count } = await query;
@@ -92,8 +55,9 @@ export class WorkspaceController {
     const slug = name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
 
     // Create workspace
-    const { data: workspace, error: workspaceError } = await prisma.workspace.create({
-      data: {
+    const { data: workspace, error: workspaceError } = await supabase
+      .from('workspaces')
+      .insert({
         id: workspaceId,
         name,
         slug,
@@ -101,18 +65,9 @@ export class WorkspaceController {
         owner_id: req.user!.id,
         settings: {},
         is_active: true
-      },
-      select: {
-        id: true,
-        name: true,
-        slug: true,
-        description: true,
-        owner_id: true,
-        settings: true,
-        is_active: true,
-        created_at: true
-      }
-    });
+      })
+      .select()
+      .single();
 
     if (workspaceError) {
       logger.error('Error creating workspace:', workspaceError);
@@ -120,25 +75,21 @@ export class WorkspaceController {
     }
 
     // Add user as admin member
-    const { error: memberError } = await prisma.workspaceMember.create({
-      data: {
+    const { error: memberError } = await supabase
+      .from('workspace_members')
+      .insert({
         id: uuidv4(),
         workspace_id: workspaceId,
         user_id: req.user!.id,
         role: 'admin',
         invited_by: req.user!.id,
         joined_at: new Date().toISOString()
-      }
-    });
+      });
 
     if (memberError) {
       logger.error('Error adding workspace member:', memberError);
       // Cleanup workspace
-      await prisma.workspace.delete({
-        where: {
-          id: workspaceId
-        }
-      });
+      await supabase.from('workspaces').delete().eq('id', workspaceId);
       throw createError('Failed to create workspace', 500);
     }
 
@@ -152,34 +103,22 @@ export class WorkspaceController {
     const { id } = req.params;
 
     // Check if user has access to workspace
-    const { data: member, error: memberError } = await prisma.workspaceMember.findFirst({
-      select: {
-        role: true
-      },
-      where: {
-        workspace_id: id,
-        user_id: req.user!.id
-      }
-    });
+    const { data: member, error: memberError } = await supabase
+      .from('workspace_members')
+      .select('role')
+      .eq('workspace_id', id)
+      .eq('user_id', req.user!.id)
+      .single();
 
     if (memberError || !member) {
       throw createError('Workspace not found', 404);
     }
 
-    const { data: workspace, error } = await prisma.workspace.findUnique({
-      select: {
-        id: true,
-        name: true,
-        slug: true,
-        description: true,
-        is_active: true,
-        created_at: true,
-        settings: true
-      },
-      where: {
-        id: id
-      }
-    });
+    const { data: workspace, error } = await supabase
+      .from('workspaces')
+      .select('*')
+      .eq('id', id)
+      .single();
 
     if (error || !workspace) {
       throw createError('Workspace not found', 404);
@@ -199,16 +138,13 @@ export class WorkspaceController {
     const { name, description, settings } = req.body;
 
     // Check if user is admin of workspace
-    const { data: member, error: memberError } = await prisma.workspaceMember.findFirst({
-      select: {
-        role: true
-      },
-      where: {
-        workspace_id: id,
-        user_id: req.user!.id,
-        role: 'admin'
-      }
-    });
+    const { data: member, error: memberError } = await supabase
+      .from('workspace_members')
+      .select('role')
+      .eq('workspace_id', id)
+      .eq('user_id', req.user!.id)
+      .eq('role', 'admin')
+      .single();
 
     if (memberError || !member) {
       throw createError('Access denied', 403);
@@ -225,21 +161,12 @@ export class WorkspaceController {
     if (description !== undefined) updateData.description = description;
     if (settings !== undefined) updateData.settings = settings;
 
-    const { data: workspace, error } = await prisma.workspace.update({
-      select: {
-        id: true,
-        name: true,
-        slug: true,
-        description: true,
-        is_active: true,
-        created_at: true,
-        settings: true
-      },
-      where: {
-        id: id
-      },
-      data: updateData
-    });
+    const { data: workspace, error } = await supabase
+      .from('workspaces')
+      .update(updateData)
+      .eq('id', id)
+      .select()
+      .single();
 
     if (error) {
       logger.error('Error updating workspace:', error);
@@ -256,27 +183,22 @@ export class WorkspaceController {
     const { id } = req.params;
 
     // Check if user is owner of workspace
-    const { data: workspace, error: workspaceError } = await prisma.workspace.findFirst({
-      select: {
-        owner_id: true,
-        name: true
-      },
-      where: {
-        id: id,
-        owner_id: req.user!.id
-      }
-    });
+    const { data: workspace, error: workspaceError } = await supabase
+      .from('workspaces')
+      .select('owner_id, name')
+      .eq('id', id)
+      .eq('owner_id', req.user!.id)
+      .single();
 
     if (workspaceError || !workspace) {
       throw createError('Workspace not found or access denied', 404);
     }
 
     // Delete workspace (cascade will handle related data)
-    const { error } = await prisma.workspace.delete({
-      where: {
-        id: id
-      }
-    });
+    const { error } = await supabase
+      .from('workspaces')
+      .delete()
+      .eq('id', id);
 
     if (error) {
       logger.error('Error deleting workspace:', error);
@@ -295,113 +217,33 @@ export class WorkspaceController {
     const offset = (Number(page) - 1) * Number(limit);
 
     // Check if user has access to workspace
-    const { data: userMember, error: memberError } = await prisma.workspaceMember.findFirst({
-      select: {
-        role: true
-      },
-      where: {
-        workspace_id: id,
-        user_id: req.user!.id
-      }
-    });
+    const { data: userMember, error: memberError } = await supabase
+      .from('workspace_members')
+      .select('role')
+      .eq('workspace_id', id)
+      .eq('user_id', req.user!.id)
+      .single();
 
     if (memberError || !userMember) {
       throw createError('Workspace not found', 404);
     }
 
-    let query = prisma.workspaceMember.findMany({
-      select: {
-        id: true,
-        role: true,
-        joined_at: true,
-        created_at: true,
-        users: {
-          select: {
-            id: true,
-            name: true,
-            email: true,
-            avatar: true,
-            last_login: true
-          }
-        }
-      },
-      where: {
-        workspace_id: id
-      },
-      skip: offset,
-      take: Number(limit),
-      orderBy: {
-        created_at: 'desc'
-      }
-    });
+    let query = supabase
+      .from('workspace_members')
+      .select(`
+        id, role, joined_at, created_at,
+        users!inner(id, name, email, avatar, last_login)
+      `, { count: 'exact' })
+      .eq('workspace_id', id)
+      .range(offset, offset + Number(limit) - 1)
+      .order('created_at', { ascending: false });
 
     if (search) {
-      query = prisma.workspaceMember.findMany({
-        select: {
-          id: true,
-          role: true,
-          joined_at: true,
-          created_at: true,
-          users: {
-            select: {
-              name: true,
-              email: true
-            },
-            where: {
-              OR: [
-                {
-                  name: {
-                    contains: search,
-                    mode: 'insensitive'
-                  }
-                },
-                {
-                  email: {
-                    contains: search,
-                    mode: 'insensitive'
-                  }
-                }
-              ]
-            }
-          }
-        },
-        where: {
-          workspace_id: id
-        },
-        skip: offset,
-        take: Number(limit),
-        orderBy: {
-          created_at: 'desc'
-        }
-      });
+      query = query.or(`users.name.ilike.%${search}%,users.email.ilike.%${search}%`);
     }
 
     if (role) {
-      query = prisma.workspaceMember.findMany({
-        select: {
-          id: true,
-          role: true,
-          joined_at: true,
-          created_at: true,
-          users: {
-            select: {
-              name: true,
-              email: true
-            },
-            where: {
-              role: role
-            }
-          }
-        },
-        where: {
-          workspace_id: id
-        },
-        skip: offset,
-        take: Number(limit),
-        orderBy: {
-          created_at: 'desc'
-        }
-      });
+      query = query.eq('role', role);
     }
 
     const { data: members, error, count } = await query;
@@ -428,75 +270,56 @@ export class WorkspaceController {
     const { email, role } = req.body;
 
     // Check if user can invite to workspace
-    const { data: userMember, error: memberError } = await prisma.workspaceMember.findFirst({
-      select: {
-        role: true
-      },
-      where: {
-        workspace_id: id,
-        user_id: req.user!.id
-      }
-    });
+    const { data: userMember, error: memberError } = await supabase
+      .from('workspace_members')
+      .select('role')
+      .eq('workspace_id', id)
+      .eq('user_id', req.user!.id)
+      .single();
 
     if (memberError || !userMember || !['admin', 'manager'].includes(userMember.role)) {
       throw createError('Access denied', 403);
     }
 
     // Check if user exists
-    const { data: invitedUser, error: userError } = await prisma.user.findUnique({
-      select: {
-        id: true,
-        name: true
-      },
-      where: {
-        email: email
-      }
-    });
+    const { data: invitedUser, error: userError } = await supabase
+      .from('users')
+      .select('id, name')
+      .eq('email', email)
+      .single();
 
     if (userError || !invitedUser) {
       throw createError('User not found', 404);
     }
 
     // Check if user is already a member
-    const { data: existingMember } = await prisma.workspaceMember.findFirst({
-      select: {
-        id: true
-      },
-      where: {
-        workspace_id: id,
-        user_id: invitedUser.id
-      }
-    });
+    const { data: existingMember } = await supabase
+      .from('workspace_members')
+      .select('id')
+      .eq('workspace_id', id)
+      .eq('user_id', invitedUser.id)
+      .single();
 
     if (existingMember) {
       throw createError('User is already a member of this workspace', 409);
     }
 
     // Add member to workspace
-    const { data: member, error } = await prisma.workspaceMember.create({
-      select: {
-        id: true,
-        role: true,
-        joined_at: true,
-        created_at: true,
-        users: {
-          select: {
-            id: true,
-            name: true,
-            email: true,
-            avatar: true
-          }
-        }
-      },
-      data: {
+    const { data: member, error } = await supabase
+      .from('workspace_members')
+      .insert({
         id: uuidv4(),
         workspace_id: id,
         user_id: invitedUser.id,
         role,
         invited_by: req.user!.id,
         joined_at: new Date().toISOString()
-      }
-    });
+      })
+      .select(`
+        id, role, joined_at, created_at,
+        users!inner(id, name, email, avatar)
+      `)
+      .single();
 
     if (error) {
       logger.error('Error inviting member:', error);
@@ -515,44 +338,35 @@ export class WorkspaceController {
     const { id, userId } = req.params;
 
     // Check if user is admin of workspace
-    const { data: userMember, error: memberError } = await prisma.workspaceMember.findFirst({
-      select: {
-        role: true
-      },
-      where: {
-        workspace_id: id,
-        user_id: req.user!.id,
-        role: 'admin'
-      }
-    });
+    const { data: userMember, error: memberError } = await supabase
+      .from('workspace_members')
+      .select('role')
+      .eq('workspace_id', id)
+      .eq('user_id', req.user!.id)
+      .eq('role', 'admin')
+      .single();
 
     if (memberError || !userMember) {
       throw createError('Access denied', 403);
     }
 
     // Prevent removing workspace owner
-    const { data: workspace } = await prisma.workspace.findFirst({
-      select: {
-        owner_id: true
-      },
-      where: {
-        id: id
-      }
-    });
+    const { data: workspace } = await supabase
+      .from('workspaces')
+      .select('owner_id')
+      .eq('id', id)
+      .single();
 
     if (workspace?.owner_id === userId) {
       throw createError('Cannot remove workspace owner', 400);
     }
 
     // Remove member
-    const { error } = await prisma.workspaceMember.delete({
-      where: {
-        workspace_id_user_id: {
-          workspace_id: id,
-          user_id: userId
-        }
-      }
-    });
+    const { error } = await supabase
+      .from('workspace_members')
+      .delete()
+      .eq('workspace_id', id)
+      .eq('user_id', userId);
 
     if (error) {
       logger.error('Error removing member:', error);
@@ -570,61 +384,40 @@ export class WorkspaceController {
     const { role } = req.body;
 
     // Check if user is admin of workspace
-    const { data: userMember, error: memberError } = await prisma.workspaceMember.findFirst({
-      select: {
-        role: true
-      },
-      where: {
-        workspace_id: id,
-        user_id: req.user!.id,
-        role: 'admin'
-      }
-    });
+    const { data: userMember, error: memberError } = await supabase
+      .from('workspace_members')
+      .select('role')
+      .eq('workspace_id', id)
+      .eq('user_id', req.user!.id)
+      .eq('role', 'admin')
+      .single();
 
     if (memberError || !userMember) {
       throw createError('Access denied', 403);
     }
 
     // Prevent changing workspace owner role
-    const { data: workspace } = await prisma.workspace.findFirst({
-      select: {
-        owner_id: true
-      },
-      where: {
-        id: id
-      }
-    });
+    const { data: workspace } = await supabase
+      .from('workspaces')
+      .select('owner_id')
+      .eq('id', id)
+      .single();
 
     if (workspace?.owner_id === userId && role !== 'admin') {
       throw createError('Cannot change workspace owner role', 400);
     }
 
     // Update member role
-    const { data: member, error } = await prisma.workspaceMember.update({
-      select: {
-        id: true,
-        role: true,
-        joined_at: true,
-        created_at: true,
-        users: {
-          select: {
-            id: true,
-            name: true,
-            email: true,
-            avatar: true
-          }
-        }
-      },
-      where: {
-        workspace_id_user_id: {
-          workspace_id: id,
-          user_id: userId
-        }
-      },
-      data: {
-        role: role
-      }
-    });
+    const { data: member, error } = await supabase
+      .from('workspace_members')
+      .update({ role })
+      .eq('workspace_id', id)
+      .eq('user_id', userId)
+      .select(`
+        id, role, joined_at, created_at,
+        users!inner(id, name, email, avatar)
+      `)
+      .single();
 
     if (error) {
       logger.error('Error updating member role:', error);
@@ -642,15 +435,12 @@ export class WorkspaceController {
     const { timeframe = '7d' } = req.query;
 
     // Check if user has access to workspace
-    const { data: member, error: memberError } = await prisma.workspaceMember.findFirst({
-      select: {
-        role: true
-      },
-      where: {
-        workspace_id: id,
-        user_id: req.user!.id
-      }
-    });
+    const { data: member, error: memberError } = await supabase
+      .from('workspace_members')
+      .select('role')
+      .eq('workspace_id', id)
+      .eq('user_id', req.user!.id)
+      .single();
 
     if (memberError || !member) {
       throw createError('Workspace not found', 404);
@@ -677,60 +467,30 @@ export class WorkspaceController {
     // Get workspace statistics
     const [pixelsResult, eventsResult, conversionsResult] = await Promise.all([
       // Pixels count
-      prisma.pixel.findMany({
-        select: {
-          id: true,
-          status: true
-        },
-        where: {
-          workspace_id: id
-        }
-      }),
+      supabase
+        .from('pixels')
+        .select('id, status')
+        .eq('workspace_id', id),
       
       // Events in timeframe
-      prisma.event.findMany({
-        select: {
-          event_name: true,
-          timestamp: true,
-          parameters: true,
-          pixels: {
-            select: {
-              workspace_id: true
-            }
-          }
-        },
-        where: {
-          pixels: {
-            some: {
-              workspace_id: id
-            }
-          },
-          timestamp: {
-            gte: startDate.toISOString(),
-            lte: endDate.toISOString()
-          }
-        }
-      }),
+      supabase
+        .from('events')
+        .select(`
+          event_name, timestamp, parameters,
+          pixels!inner(workspace_id)
+        `)
+        .eq('pixels.workspace_id', id)
+        .gte('timestamp', startDate.toISOString())
+        .lte('timestamp', endDate.toISOString()),
       
       // Conversions
-      prisma.conversion.findMany({
-        select: {
-          total_conversions: true,
-          total_value: true,
-          pixels: {
-            select: {
-              workspace_id: true
-            }
-          }
-        },
-        where: {
-          pixels: {
-            some: {
-              workspace_id: id
-            }
-          }
-        }
-      })
+      supabase
+        .from('conversions')
+        .select(`
+          total_conversions, total_value,
+          pixels!inner(workspace_id)
+        `)
+        .eq('pixels.workspace_id', id)
     ]);
 
     const pixels = pixelsResult.data || [];

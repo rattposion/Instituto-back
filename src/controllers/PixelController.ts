@@ -1,5 +1,5 @@
 import { Response } from 'express';
-import { prisma } from '../config/database';
+import { supabase } from '../config/database';
 import { AuthRequest } from '../middleware/auth';
 import { createError } from '../middleware/errorHandler';
 import { logger } from '../utils/logger';
@@ -10,7 +10,7 @@ export class PixelController {
     const { page = 1, limit = 20, search, sortBy = 'created_at', sortOrder = 'desc' } = req.query;
     const offset = (Number(page) - 1) * Number(limit);
 
-    let query = prisma
+    let query = supabase
       .from('pixels')
       .select('*', { count: 'exact' })
       .eq('workspace_id', req.user!.workspaceId)
@@ -43,7 +43,7 @@ export class PixelController {
   async getPixelById(req: AuthRequest, res: Response) {
     const { id } = req.params;
 
-    const { data: pixel, error } = await prisma
+    const { data: pixel, error } = await supabase
       .from('pixels')
       .select('*')
       .eq('id', id)
@@ -64,7 +64,7 @@ export class PixelController {
     const { name, pixelId, metaAccount } = req.body;
 
     // Check if pixel ID already exists in workspace
-    const { data: existingPixel } = await prisma
+    const { data: existingPixel } = await supabase
       .from('pixels')
       .select('id')
       .eq('pixel_id', pixelId)
@@ -88,7 +88,7 @@ export class PixelController {
       settings: {}
     };
 
-    const { data: pixel, error } = await prisma
+    const { data: pixel, error } = await supabase
       .from('pixels')
       .insert(pixelData)
       .select()
@@ -121,7 +121,7 @@ export class PixelController {
     const { name, metaAccount, settings } = req.body;
 
     // Check if pixel exists and belongs to workspace
-    const { data: existingPixel, error: fetchError } = await prisma
+    const { data: existingPixel, error: fetchError } = await supabase
       .from('pixels')
       .select('*')
       .eq('id', id)
@@ -140,7 +140,7 @@ export class PixelController {
     if (metaAccount !== undefined) updateData.meta_account = metaAccount;
     if (settings !== undefined) updateData.settings = settings;
 
-    const { data: pixel, error } = await prisma
+    const { data: pixel, error } = await supabase
       .from('pixels')
       .update(updateData)
       .eq('id', id)
@@ -173,7 +173,7 @@ export class PixelController {
     const { id } = req.params;
 
     // Check if pixel exists and belongs to workspace
-    const { data: existingPixel, error: fetchError } = await prisma
+    const { data: existingPixel, error: fetchError } = await supabase
       .from('pixels')
       .select('name')
       .eq('id', id)
@@ -185,12 +185,12 @@ export class PixelController {
     }
 
     // Delete related data first (events, conversions, etc.)
-    await prisma.from('events').delete().eq('pixel_id', id);
-    await prisma.from('conversions').delete().eq('pixel_id', id);
-    await prisma.from('diagnostics').delete().eq('pixel_id', id);
+    await supabase.from('events').delete().eq('pixel_id', id);
+    await supabase.from('conversions').delete().eq('pixel_id', id);
+    await supabase.from('diagnostics').delete().eq('pixel_id', id);
 
     // Delete pixel
-    const { error } = await prisma
+    const { error } = await supabase
       .from('pixels')
       .delete()
       .eq('id', id);
@@ -222,7 +222,7 @@ export class PixelController {
     const { timeframe = '7d' } = req.query;
 
     // Check if pixel exists and belongs to workspace
-    const { data: pixel, error: pixelError } = await prisma
+    const { data: pixel, error: pixelError } = await supabase
       .from('pixels')
       .select('id')
       .eq('id', id)
@@ -255,7 +255,7 @@ export class PixelController {
     }
 
     // Get events analytics
-    const { data: eventsData, error: eventsError } = await prisma
+    const { data: eventsData, error: eventsError } = await supabase
       .from('events')
       .select('event_name, timestamp, parameters')
       .eq('pixel_id', id)
@@ -283,7 +283,7 @@ export class PixelController {
     const offset = (Number(page) - 1) * Number(limit);
 
     // Check if pixel exists and belongs to workspace
-    const { data: pixel, error: pixelError } = await prisma
+    const { data: pixel, error: pixelError } = await supabase
       .from('pixels')
       .select('id')
       .eq('id', id)
@@ -294,7 +294,7 @@ export class PixelController {
       throw createError('Pixel not found', 404);
     }
 
-    let query = prisma
+    let query = supabase
       .from('events')
       .select('*', { count: 'exact' })
       .eq('pixel_id', id)
@@ -334,7 +334,7 @@ export class PixelController {
     const { id } = req.params;
 
     // Check if pixel exists and belongs to workspace
-    const { data: pixel, error: pixelError } = await prisma
+    const { data: pixel, error: pixelError } = await supabase
       .from('pixels')
       .select('*')
       .eq('id', id)
@@ -354,7 +354,7 @@ export class PixelController {
     };
 
     // Update pixel status based on test
-    await prisma
+    await supabase
       .from('pixels')
       .update({
         status: testResult.connected ? 'active' : 'error',
@@ -409,7 +409,7 @@ export class PixelController {
     req: AuthRequest
   ) {
     try {
-      await prisma
+      await supabase
         .from('audit_logs')
         .insert({
           id: uuidv4(),

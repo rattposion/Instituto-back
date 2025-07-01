@@ -1,4 +1,4 @@
-import { prisma } from '../config/database';
+import { supabase } from '../config/database';
 import { hashPassword } from '../utils/crypto';
 import { logger } from '../utils/logger';
 import { v4 as uuidv4 } from 'uuid';
@@ -9,23 +9,23 @@ async function seedDatabase() {
 
     // Create demo workspace
     const workspaceId = uuidv4();
-    const { data: workspace, error: workspaceError } = await prisma
-      .workspace()
-      .create({
-        data: {
-          id: workspaceId,
-          name: 'Demo Workspace',
-          slug: 'demo-workspace',
-          description: 'Workspace de demonstração com dados de exemplo',
-          owner_id: '', // Will be updated after user creation
-          settings: {
-            timezone: 'America/Sao_Paulo',
-            currency: 'BRL',
-            dateFormat: 'DD/MM/YYYY'
-          },
-          is_active: true
-        }
-      });
+    const { data: workspace, error: workspaceError } = await supabase
+      .from('workspaces')
+      .insert({
+        id: workspaceId,
+        name: 'Demo Workspace',
+        slug: 'demo-workspace',
+        description: 'Workspace de demonstração com dados de exemplo',
+        owner_id: '', // Will be updated after user creation
+        settings: {
+          timezone: 'America/Sao_Paulo',
+          currency: 'BRL',
+          dateFormat: 'DD/MM/YYYY'
+        },
+        is_active: true
+      })
+      .select()
+      .single();
 
     if (workspaceError) {
       throw workspaceError;
@@ -35,45 +35,41 @@ async function seedDatabase() {
     const userId = uuidv4();
     const passwordHash = await hashPassword('demo123456');
     
-    const { data: user, error: userError } = await prisma
-      .user()
-      .create({
-        data: {
-          id: userId,
-          name: 'Demo User',
-          email: 'demo@metapixel.com',
-          password_hash: passwordHash,
-          role: 'admin',
-          workspace_id: workspaceId,
-          is_active: true,
-          email_verified: true
-        }
-      });
+    const { data: user, error: userError } = await supabase
+      .from('users')
+      .insert({
+        id: userId,
+        name: 'Demo User',
+        email: 'demo@metapixel.com',
+        password_hash: passwordHash,
+        role: 'admin',
+        workspace_id: workspaceId,
+        is_active: true,
+        email_verified: true
+      })
+      .select()
+      .single();
 
     if (userError) {
       throw userError;
     }
 
     // Update workspace owner
-    await prisma
-      .workspace()
-      .update({
-        where: { id: workspaceId },
-        data: { owner_id: userId }
-      });
+    await supabase
+      .from('workspaces')
+      .update({ owner_id: userId })
+      .eq('id', workspaceId);
 
     // Create workspace member record
-    await prisma
-      .workspace_member()
-      .create({
-        data: {
-          id: uuidv4(),
-          workspace_id: workspaceId,
-          user_id: userId,
-          role: 'admin',
-          invited_by: userId,
-          joined_at: new Date().toISOString()
-        }
+    await supabase
+      .from('workspace_members')
+      .insert({
+        id: uuidv4(),
+        workspace_id: workspaceId,
+        user_id: userId,
+        role: 'admin',
+        invited_by: userId,
+        joined_at: new Date().toISOString()
       });
 
     // Create demo pixels
@@ -128,11 +124,9 @@ async function seedDatabase() {
       }
     ];
 
-    const { error: pixelsError } = await prisma
-      .pixel()
-      .createMany({
-        data: pixels
-      });
+    const { error: pixelsError } = await supabase
+      .from('pixels')
+      .insert(pixels);
 
     if (pixelsError) {
       throw pixelsError;
@@ -164,11 +158,9 @@ async function seedDatabase() {
       });
     }
 
-    const { error: eventsError } = await prisma
-      .event()
-      .createMany({
-        data: events
-      });
+    const { error: eventsError } = await supabase
+      .from('events')
+      .insert(events);
 
     if (eventsError) {
       throw eventsError;
@@ -216,11 +208,9 @@ async function seedDatabase() {
       }
     ];
 
-    const { error: conversionsError } = await prisma
-      .conversion()
-      .createMany({
-        data: conversions
-      });
+    const { error: conversionsError } = await supabase
+      .from('conversions')
+      .insert(conversions);
 
     if (conversionsError) {
       throw conversionsError;
@@ -258,11 +248,9 @@ async function seedDatabase() {
       }
     ];
 
-    const { error: integrationsError } = await prisma
-      .integration()
-      .createMany({
-        data: integrations
-      });
+    const { error: integrationsError } = await supabase
+      .from('integrations')
+      .insert(integrations);
 
     if (integrationsError) {
       throw integrationsError;
@@ -292,11 +280,9 @@ async function seedDatabase() {
       }
     ];
 
-    const { error: diagnosticsError } = await prisma
-      .diagnostic()
-      .createMany({
-        data: diagnostics
-      });
+    const { error: diagnosticsError } = await supabase
+      .from('diagnostics')
+      .insert(diagnostics);
 
     if (diagnosticsError) {
       throw diagnosticsError;

@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
-import { prisma } from '../config/database';
+import { Database } from '../config/database';
 import { JWTPayload } from '../types';
 import { logger } from '../utils/logger';
 
@@ -23,17 +23,16 @@ export const authenticate = async (req: AuthRequest, res: Response, next: NextFu
     const decoded = jwt.verify(token, process.env.JWT_SECRET!) as JWTPayload;
     
     // Verify user exists and is active
-    const { data: user, error } = await prisma
-      .$queryRaw`
-        SELECT id, workspace_id, role, is_active
-        FROM users
-        WHERE id = ${decoded.userId} AND is_active = true
-        LIMIT 1
-      `;
+    const userResult = await Database.query(
+      'SELECT id, workspace_id, role, is_active FROM users WHERE id = $1 AND is_active = true',
+      [decoded.userId]
+    );
 
-    if (error || !user) {
+    if (userResult.rows.length === 0) {
       return res.status(401).json({ error: 'Invalid token' });
     }
+
+    const user = userResult.rows[0];
 
     req.user = {
       id: user.id,
@@ -71,19 +70,16 @@ export const validateWorkspace = async (req: AuthRequest, res: Response, next: N
     }
 
     // Check if user has access to workspace
-    const { data: member, error } = await prisma
-      .$queryRaw`
-        SELECT role
-        FROM workspace_members
-        WHERE workspace_id = ${workspaceId} AND user_id = ${req.user!.id}
-        LIMIT 1
-      `;
+    const memberResult = await Database.query(
+      'SELECT role FROM workspace_members WHERE workspace_id = $1 AND user_id = $2',
+      [workspaceId, req.user!.id]
+    );
 
-    if (error || !member) {
+    if (memberResult.rows.length === 0) {
       return res.status(403).json({ error: 'Access denied to workspace' });
     }
 
-    req.user!.role = member.role;
+    req.user!.role = memberResult.rows[0].role;
     next();
   } catch (error) {
     logger.error('Workspace validation error:', error);

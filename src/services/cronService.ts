@@ -1,5 +1,5 @@
 import cron from 'node-cron';
-import { prisma } from '../config/database';
+import { supabase } from '../config/database';
 import { logger } from '../utils/logger';
 
 export function startCronJobs() {
@@ -33,11 +33,15 @@ export function startCronJobs() {
 async function runPixelDiagnostics() {
   try {
     // Get all active pixels
-    const pixels = await prisma.pixel.findMany({
-      where: {
-        status: 'active'
-      }
-    });
+    const { data: pixels, error } = await supabase
+      .from('pixels')
+      .select('*')
+      .eq('status', 'active');
+
+    if (error) {
+      logger.error('Error fetching pixels for diagnostics:', error);
+      return;
+    }
 
     for (const pixel of pixels) {
       await checkPixelHealth(pixel);
@@ -52,30 +56,23 @@ async function checkPixelHealth(pixel: any) {
   const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
 
   // Check for recent events
-  const recentEvents = await prisma.event.findMany({
-    where: {
-      pixel_id: pixel.id,
-      timestamp: {
-        gte: oneHourAgo.toISOString()
-      }
-    },
-    take: 1
-  });
+  const { data: recentEvents, error } = await supabase
+    .from('events')
+    .select('id')
+    .eq('pixel_id', pixel.id)
+    .gte('timestamp', oneHourAgo.toISOString())
+    .limit(1);
+
+  if (error) {
+    logger.error(`Error checking events for pixel ${pixel.id}:`, error);
+    return;
+  }
 
   // Create diagnostic if no recent events
-  if (recentEvents.length === 0) {
-    await prisma.diagnostic.upsert({
-      where: {
-        pixel_id_title: {
-          pixel_id: pixel.id,
-          title: 'Low event volume'
-        }
-      },
-      update: {
-        status: 'active',
-        last_checked: now.toISOString()
-      },
-      create: {
+  if (!recentEvents || recentEvents.length === 0) {
+    await supabase
+      .from('diagnostics')
+      .upsert({
         pixel_id: pixel.id,
         severity: 'warning',
         category: 'performance',
@@ -83,31 +80,22 @@ async function checkPixelHealth(pixel: any) {
         description: 'No events received in the last hour',
         status: 'active',
         last_checked: now.toISOString()
-      }
-    });
+      }, {
+        onConflict: 'pixel_id,title'
+      });
 
     // Update pixel status
-    await prisma.pixel.update({
-      where: {
-        id: pixel.id
-      },
-      data: {
-        status: 'inactive'
-      }
-    });
+    await supabase
+      .from('pixels')
+      .update({ status: 'inactive' })
+      .eq('id', pixel.id);
   } else {
     // Resolve diagnostic if exists
-    await prisma.diagnostic.update({
-      where: {
-        pixel_id_title: {
-          pixel_id: pixel.id,
-          title: 'Low event volume'
-        }
-      },
-      data: {
-        status: 'resolved'
-      }
-    });
+    await supabase
+      .from('diagnostics')
+      .update({ status: 'resolved' })
+      .eq('pixel_id', pixel.id)
+      .eq('title', 'Low event volume');
   }
 }
 
@@ -117,15 +105,14 @@ async function cleanupOldEvents() {
     const cutoffDate = new Date();
     cutoffDate.setDate(cutoffDate.getDate() - retentionDays);
 
-    const events = await prisma.event.deleteMany({
-      where: {
-        timestamp: {
-          lt: cutoffDate.toISOString()
-        }
-      }
-    });
+    const { error } = await supabase
+      .from('events')
+      .delete()
+      .lt('timestamp', cutoffDate.toISOString());
 
-    if (events.count > 0) {
+    if (error) {
+      logger.error('Error cleaning up old events:', error);
+    } else {
       logger.info(`Cleaned up events older than ${cutoffDate.toISOString()}`);
     }
   } catch (error) {
@@ -136,11 +123,14 @@ async function cleanupOldEvents() {
 async function updatePixelStatistics() {
   try {
     // Get all pixels
-    const pixels = await prisma.pixel.findMany({
-      select: {
-        id: true
-      }
-    });
+    const { data: pixels, error } = await supabase
+      .from('pixels')
+      .select('id');
+
+    if (error) {
+      logger.error('Error fetching pixels for stats update:', error);
+      return;
+    }
 
     for (const pixel of pixels) {
       await updatePixelStats(pixel.id);
@@ -155,18 +145,16 @@ async function updatePixelStats(pixelId: string) {
   last24Hours.setDate(last24Hours.getDate() - 1);
 
   // Get events count and revenue for last 24 hours
-  const events = await prisma.event.findMany({
-    select: {
-      event_name: true,
-      parameters: true
-    },
-    where: {
-      pixel_id: pixelId,
-      timestamp: {
-        gte: last24Hours.toISOString()
-      }
-    }
-  });
+  const { data: events, error } = await supabase
+    .from('events')
+    .select('event_name, parameters')
+    .eq('pixel_id', pixelId)
+    .gte('timestamp', last24Hours.toISOString());
+
+  if (error) {
+    logger.error(`Error fetching events for pixel ${pixelId}:`, error);
+    return;
+  }
 
   let conversions = 0;
   let revenue = 0;
@@ -179,17 +167,15 @@ async function updatePixelStats(pixelId: string) {
   });
 
   // Update pixel statistics
-  await prisma.pixel.update({
-    where: {
-      id: pixelId
-    },
-    data: {
+  await supabase
+    .from('pixels')
+    .update({
       events_count: events.length,
       conversions_count: conversions,
       revenue: revenue,
       last_activity: events.length > 0 ? new Date().toISOString() : null
-    }
-  });
+    })
+    .eq('id', pixelId);
 }
 
 async function processFailedEvents() {
@@ -198,17 +184,17 @@ async function processFailedEvents() {
     const oneHourAgo = new Date();
     oneHourAgo.setHours(oneHourAgo.getHours() - 1);
 
-    const failedEvents = await prisma.event.findMany({
-      where: {
-        error_message: {
-          not: null
-        },
-        created_at: {
-          gte: oneHourAgo.toISOString()
-        }
-      },
-      take: 100
-    });
+    const { data: failedEvents, error } = await supabase
+      .from('events')
+      .select('*')
+      .not('error_message', 'is', null)
+      .gte('created_at', oneHourAgo.toISOString())
+      .limit(100);
+
+    if (error) {
+      logger.error('Error fetching failed events:', error);
+      return;
+    }
 
     let reprocessedCount = 0;
     for (const event of failedEvents) {
@@ -217,16 +203,14 @@ async function processFailedEvents() {
         const success = Math.random() > 0.3; // 70% success rate on retry
         
         if (success) {
-          await prisma.event.update({
-            where: {
-              id: event.id
-            },
-            data: {
+          await supabase
+            .from('events')
+            .update({
               processed: true,
               error_message: null,
               updated_at: new Date().toISOString()
-            }
-          });
+            })
+            .eq('id', event.id);
           
           reprocessedCount++;
         }

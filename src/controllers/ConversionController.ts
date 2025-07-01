@@ -1,5 +1,5 @@
 import { Response } from 'express';
-import { prisma } from '../config/database';
+import { supabase } from '../config/database';
 import { AuthRequest } from '../middleware/auth';
 import { createError } from '../middleware/errorHandler';
 import { logger } from '../utils/logger';
@@ -10,80 +10,38 @@ export class ConversionController {
     const { page = 1, limit = 20, search, pixelId, isActive, sortBy = 'created_at', sortOrder = 'desc' } = req.query;
     const offset = (Number(page) - 1) * Number(limit);
 
-    let query = prisma.conversion.findMany({
-      select: {
-        id: true,
-        name: true,
-        pixel: {
-          select: {
-            id: true,
-            name: true,
-            workspaceId: true
-          }
-        },
-        eventName: true,
-        rules: true,
-        conversionRate: true,
-        totalConversions: true,
-        totalValue: true,
-        averageValue: true,
-        isActive: true,
-        createdAt: true,
-        updatedAt: true
-      },
-      where: {
-        pixel: {
-          workspaceId: req.user!.workspaceId
-        }
-      },
-      take: Number(limit),
-      skip: offset,
-      orderBy: {
-        [sortBy as string]: sortOrder === 'asc' ? 'asc' : 'desc'
-      }
-    });
+    let query = supabase
+      .from('conversions')
+      .select(`
+        *,
+        pixels!inner(id, name, workspace_id)
+      `, { count: 'exact' })
+      .eq('pixels.workspace_id', req.user!.workspaceId)
+      .range(offset, offset + Number(limit) - 1)
+      .order(sortBy as string, { ascending: sortOrder === 'asc' });
 
     if (search) {
-      query = query.where(
-        {
-          OR: [
-            { name: { contains: search, mode: 'insensitive' } },
-            { pixel: { some: { name: { contains: search, mode: 'insensitive' } } } },
-            { pixel: { some: { workspaceId: { contains: search, mode: 'insensitive' } } } }
-          ]
-        }
-      );
+      query = query.ilike('name', `%${search}%`);
     }
 
     if (pixelId) {
-      query = query.where({
-        pixel: {
-          some: {
-            id: pixelId
-          }
-        }
-      });
+      query = query.eq('pixel_id', pixelId);
     }
 
     if (isActive !== undefined) {
-      query = query.where({
-        isActive: isActive === 'true'
-      });
+      query = query.eq('is_active', isActive === 'true');
     }
 
-    const { count } = await prisma.conversion.count({
-      where: {
-        pixel: {
-          workspaceId: req.user!.workspaceId
-        }
-      }
-    });
+    const { data: conversions, error, count } = await query;
 
-    const data = await query;
+    if (error) {
+      logger.error('Error fetching conversions:', error);
+      throw createError('Failed to fetch conversions', 500);
+    }
 
     res.json({
       success: true,
-      data,
+      data: conversions,
       pagination: {
         page: Number(page),
         limit: Number(limit),
@@ -96,42 +54,23 @@ export class ConversionController {
   async getConversionById(req: AuthRequest, res: Response) {
     const { id } = req.params;
 
-    const data = await prisma.conversion.findUnique({
-      select: {
-        id: true,
-        name: true,
-        pixel: {
-          select: {
-            id: true,
-            name: true,
-            workspaceId: true
-          }
-        },
-        eventName: true,
-        rules: true,
-        conversionRate: true,
-        totalConversions: true,
-        totalValue: true,
-        averageValue: true,
-        isActive: true,
-        createdAt: true,
-        updatedAt: true
-      },
-      where: {
-        id,
-        pixel: {
-          workspaceId: req.user!.workspaceId
-        }
-      }
-    });
+    const { data: conversion, error } = await supabase
+      .from('conversions')
+      .select(`
+        *,
+        pixels!inner(id, name, workspace_id)
+      `)
+      .eq('id', id)
+      .eq('pixels.workspace_id', req.user!.workspaceId)
+      .single();
 
-    if (!data) {
+    if (error || !conversion) {
       throw createError('Conversion not found', 404);
     }
 
     res.json({
       success: true,
-      data
+      data: conversion
     });
   }
 
@@ -139,37 +78,44 @@ export class ConversionController {
     const { name, pixelId, eventName, rules } = req.body;
 
     // Verify pixel belongs to workspace
-    const pixel = await prisma.pixel.findUnique({
-      where: {
-        id: pixelId,
-        workspaceId: req.user!.workspaceId
-      }
-    });
+    const { data: pixel, error: pixelError } = await supabase
+      .from('pixels')
+      .select('id')
+      .eq('id', pixelId)
+      .eq('workspace_id', req.user!.workspaceId)
+      .single();
 
-    if (!pixel) {
+    if (pixelError || !pixel) {
       throw createError('Pixel not found', 404);
     }
 
     const conversionData = {
       id: uuidv4(),
       name,
-      pixelId,
-      eventName,
+      pixel_id: pixelId,
+      event_name: eventName,
       rules: rules || [],
-      conversionRate: 0,
-      totalConversions: 0,
-      totalValue: 0,
-      averageValue: 0,
-      isActive: true
+      conversion_rate: 0,
+      total_conversions: 0,
+      total_value: 0,
+      average_value: 0,
+      is_active: true
     };
 
-    const data = await prisma.conversion.create({
-      data: conversionData
-    });
+    const { data: conversion, error } = await supabase
+      .from('conversions')
+      .insert(conversionData)
+      .select()
+      .single();
+
+    if (error) {
+      logger.error('Error creating conversion:', error);
+      throw createError('Failed to create conversion', 500);
+    }
 
     res.status(201).json({
       success: true,
-      data
+      data: conversion
     });
   }
 
@@ -178,29 +124,22 @@ export class ConversionController {
     const { name, eventName, rules, isActive } = req.body;
 
     // Check if conversion exists and belongs to workspace
-    const existingConversion = await prisma.conversion.findUnique({
-      select: {
-        id: true,
-        name: true,
-        eventName: true,
-        rules: true,
-        isActive: true,
-        updatedAt: true
-      },
-      where: {
-        id,
-        pixel: {
-          workspaceId: req.user!.workspaceId
-        }
-      }
-    });
+    const { data: existingConversion, error: fetchError } = await supabase
+      .from('conversions')
+      .select(`
+        *,
+        pixels!inner(workspace_id)
+      `)
+      .eq('id', id)
+      .eq('pixels.workspace_id', req.user!.workspaceId)
+      .single();
 
-    if (!existingConversion) {
+    if (fetchError || !existingConversion) {
       throw createError('Conversion not found', 404);
     }
 
     const updateData: any = {
-      updatedAt: new Date().toISOString()
+      updated_at: new Date().toISOString()
     };
 
     if (name !== undefined) updateData.name = name;

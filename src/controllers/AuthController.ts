@@ -1,5 +1,5 @@
 import { Request, Response } from 'express';
-import { supabase } from '../config/database';
+import { Database } from '../config/database';
 import { hashPassword, comparePassword } from '../utils/crypto';
 import { generateToken } from '../utils/jwt';
 import { createError } from '../middleware/errorHandler';
@@ -12,85 +12,67 @@ export class AuthController {
     const { name, email, password, workspaceName } = req.body;
 
     // Check if user already exists
-    const { data: existingUser } = await supabase
-      .from('users')
-      .select('id')
-      .eq('email', email)
-      .single();
+    const existingUserResult = await Database.query(
+      'SELECT id FROM users WHERE email = $1',
+      [email]
+    );
 
-    if (existingUser) {
+    if (existingUserResult.rows.length > 0) {
       throw createError('User already exists', 409);
     }
 
     // Hash password
     const passwordHash = await hashPassword(password);
 
-    // Create workspace first
-    const workspaceId = uuidv4();
-    const { error: workspaceError } = await supabase
-      .from('workspaces')
-      .insert({
-        id: workspaceId,
-        name: workspaceName || `${name}'s Workspace`,
-        slug: (workspaceName || `${name}-workspace`).toLowerCase().replace(/\s+/g, '-'),
-        owner_id: '', // Will be updated after user creation
-        settings: {},
-        is_active: true
-      });
+    // Create workspace and user in transaction
+    const result = await Database.transaction(async (client) => {
+      // Create workspace first
+      const workspaceId = uuidv4();
+      await client.query(
+        `INSERT INTO workspaces (id, name, slug, settings, is_active) 
+         VALUES ($1, $2, $3, $4, $5)`,
+        [
+          workspaceId,
+          workspaceName || `${name}'s Workspace`,
+          (workspaceName || `${name}-workspace`).toLowerCase().replace(/\s+/g, '-'),
+          JSON.stringify({}),
+          true
+        ]
+      );
 
-    if (workspaceError) {
-      logger.error('Workspace creation error:', workspaceError);
-      throw createError('Failed to create workspace', 500);
-    }
+      // Create user
+      const userId = uuidv4();
+      await client.query(
+        `INSERT INTO users (id, name, email, password_hash, role, workspace_id, is_active) 
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [userId, name, email, passwordHash, 'admin', workspaceId, true]
+      );
 
-    // Create user
-    const userId = uuidv4();
-    const { error: userError } = await supabase
-      .from('users')
-      .insert({
-        id: userId,
-        name,
-        email,
-        password_hash: passwordHash,
-        role: 'admin',
-        workspace_id: workspaceId,
-        is_active: true
-      });
+      // Update workspace owner
+      await client.query(
+        'UPDATE workspaces SET owner_id = $1 WHERE id = $2',
+        [userId, workspaceId]
+      );
 
-    if (userError) {
-      logger.error('User creation error:', userError);
-      // Cleanup workspace
-      await supabase.from('workspaces').delete().eq('id', workspaceId);
-      throw createError('Failed to create user', 500);
-    }
+      // Create workspace member record
+      await client.query(
+        `INSERT INTO workspace_members (id, workspace_id, user_id, role, invited_by, joined_at) 
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [uuidv4(), workspaceId, userId, 'admin', userId, new Date()]
+      );
 
-    // Update workspace owner
-    await supabase
-      .from('workspaces')
-      .update({ owner_id: userId })
-      .eq('id', workspaceId);
-
-    // Create workspace member record
-    await supabase
-      .from('workspace_members')
-      .insert({
-        id: uuidv4(),
-        workspace_id: workspaceId,
-        user_id: userId,
-        role: 'admin',
-        invited_by: userId,
-        joined_at: new Date().toISOString()
-      });
+      return { userId, workspaceId };
+    });
 
     // Generate token
     const token = generateToken({
-      userId,
-      workspaceId,
+      userId: result.userId,
+      workspaceId: result.workspaceId,
       role: 'admin'
     });
 
     // Log audit event
-    await this.logAuditEvent(workspaceId, userId, 'user.register', 'user', userId, {
+    await this.logAuditEvent(result.workspaceId, result.userId, 'user.register', 'user', result.userId, {
       email,
       name
     }, req);
@@ -100,11 +82,11 @@ export class AuthController {
       data: {
         token,
         user: {
-          id: userId,
+          id: result.userId,
           name,
           email,
           role: 'admin',
-          workspaceId
+          workspaceId: result.workspaceId
         }
       }
     });
@@ -114,19 +96,20 @@ export class AuthController {
     const { email, password } = req.body;
 
     // Get user with workspace info
-    const { data: user, error } = await supabase
-      .from('users')
-      .select(`
-        id, name, email, password_hash, role, workspace_id, is_active,
-        workspaces!inner(id, name, is_active)
-      `)
-      .eq('email', email)
-      .eq('is_active', true)
-      .single();
+    const userResult = await Database.query(
+      `SELECT u.id, u.name, u.email, u.password_hash, u.role, u.workspace_id, u.is_active,
+              w.id as workspace_id, w.name as workspace_name, w.is_active as workspace_active
+       FROM users u
+       INNER JOIN workspaces w ON u.workspace_id = w.id
+       WHERE u.email = $1 AND u.is_active = true`,
+      [email]
+    );
 
-    if (error || !user) {
+    if (userResult.rows.length === 0) {
       throw createError('Invalid credentials', 401);
     }
+
+    const user = userResult.rows[0];
 
     // Verify password
     const isValidPassword = await comparePassword(password, user.password_hash);
@@ -135,15 +118,15 @@ export class AuthController {
     }
 
     // Check workspace is active
-    if (!user.workspaces.is_active) {
+    if (!user.workspace_active) {
       throw createError('Workspace is inactive', 403);
     }
 
     // Update last login
-    await supabase
-      .from('users')
-      .update({ last_login: new Date().toISOString() })
-      .eq('id', user.id);
+    await Database.query(
+      'UPDATE users SET last_login = $1 WHERE id = $2',
+      [new Date(), user.id]
+    );
 
     // Generate token
     const token = generateToken({
@@ -168,8 +151,8 @@ export class AuthController {
           role: user.role,
           workspaceId: user.workspace_id,
           workspace: {
-            id: user.workspaces.id,
-            name: user.workspaces.name
+            id: user.workspace_id,
+            name: user.workspace_name
           }
         }
       }
@@ -195,18 +178,20 @@ export class AuthController {
   }
 
   async getProfile(req: AuthRequest, res: Response) {
-    const { data: user, error } = await supabase
-      .from('users')
-      .select(`
-        id, name, email, role, avatar, last_login, created_at,
-        workspaces!inner(id, name, slug)
-      `)
-      .eq('id', req.user!.id)
-      .single();
+    const userResult = await Database.query(
+      `SELECT u.id, u.name, u.email, u.role, u.avatar, u.last_login, u.created_at,
+              w.id as workspace_id, w.name as workspace_name, w.slug as workspace_slug
+       FROM users u
+       INNER JOIN workspaces w ON u.workspace_id = w.id
+       WHERE u.id = $1`,
+      [req.user!.id]
+    );
 
-    if (error || !user) {
+    if (userResult.rows.length === 0) {
       throw createError('User not found', 404);
     }
+
+    const user = userResult.rows[0];
 
     res.json({
       success: true,
@@ -218,7 +203,11 @@ export class AuthController {
         avatar: user.avatar,
         lastLogin: user.last_login,
         createdAt: user.created_at,
-        workspace: user.workspaces
+        workspace: {
+          id: user.workspace_id,
+          name: user.workspace_name,
+          slug: user.workspace_slug
+        }
       }
     });
   }
@@ -226,19 +215,10 @@ export class AuthController {
   async updateProfile(req: AuthRequest, res: Response) {
     const { name, avatar } = req.body;
 
-    const { error } = await supabase
-      .from('users')
-      .update({
-        name,
-        avatar,
-        updated_at: new Date().toISOString()
-      })
-      .eq('id', req.user!.id);
-
-    if (error) {
-      logger.error('Profile update error:', error);
-      throw createError('Failed to update profile', 500);
-    }
+    await Database.query(
+      'UPDATE users SET name = $1, avatar = $2, updated_at = $3 WHERE id = $4',
+      [name, avatar, new Date(), req.user!.id]
+    );
 
     // Log audit event
     await this.logAuditEvent(
@@ -261,15 +241,16 @@ export class AuthController {
     const { currentPassword, newPassword } = req.body;
 
     // Get current password hash
-    const { data: user, error } = await supabase
-      .from('users')
-      .select('password_hash')
-      .eq('id', req.user!.id)
-      .single();
+    const userResult = await Database.query(
+      'SELECT password_hash FROM users WHERE id = $1',
+      [req.user!.id]
+    );
 
-    if (error || !user) {
+    if (userResult.rows.length === 0) {
       throw createError('User not found', 404);
     }
+
+    const user = userResult.rows[0];
 
     // Verify current password
     const isValidPassword = await comparePassword(currentPassword, user.password_hash);
@@ -281,18 +262,10 @@ export class AuthController {
     const newPasswordHash = await hashPassword(newPassword);
 
     // Update password
-    const { error: updateError } = await supabase
-      .from('users')
-      .update({
-        password_hash: newPasswordHash,
-        updated_at: new Date().toISOString()
-      })
-      .eq('id', req.user!.id);
-
-    if (updateError) {
-      logger.error('Password update error:', updateError);
-      throw createError('Failed to update password', 500);
-    }
+    await Database.query(
+      'UPDATE users SET password_hash = $1, updated_at = $2 WHERE id = $3',
+      [newPasswordHash, new Date(), req.user!.id]
+    );
 
     // Log audit event
     await this.logAuditEvent(
@@ -315,12 +288,10 @@ export class AuthController {
     const { email } = req.body;
 
     // Check if user exists
-    const { data: user } = await supabase
-      .from('users')
-      .select('id, name')
-      .eq('email', email)
-      .eq('is_active', true)
-      .single();
+    const userResult = await Database.query(
+      'SELECT id, name FROM users WHERE email = $1 AND is_active = true',
+      [email]
+    );
 
     // Always return success to prevent email enumeration
     res.json({
@@ -328,7 +299,7 @@ export class AuthController {
       message: 'If the email exists, a reset link has been sent'
     });
 
-    if (user) {
+    if (userResult.rows.length > 0) {
       // TODO: Implement email sending logic
       logger.info(`Password reset requested for user: ${email}`);
     }
@@ -374,19 +345,21 @@ export class AuthController {
     req: Request
   ) {
     try {
-      await supabase
-        .from('audit_logs')
-        .insert({
-          id: uuidv4(),
-          workspace_id: workspaceId,
-          user_id: userId,
+      await Database.query(
+        `INSERT INTO audit_logs (id, workspace_id, user_id, action, resource_type, resource_id, details, ip_address, user_agent)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+        [
+          uuidv4(),
+          workspaceId,
+          userId,
           action,
-          resource_type: resourceType,
-          resource_id: resourceId,
-          details,
-          ip_address: req.ip,
-          user_agent: req.get('User-Agent')
-        });
+          resourceType,
+          resourceId,
+          JSON.stringify(details),
+          req.ip,
+          req.get('User-Agent')
+        ]
+      );
     } catch (error) {
       logger.error('Failed to log audit event:', error);
     }

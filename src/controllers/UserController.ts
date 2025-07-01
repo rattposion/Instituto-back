@@ -1,5 +1,5 @@
 import { Response } from 'express';
-import { prisma } from '../config/database';
+import { supabase } from '../config/database';
 import { AuthRequest } from '../middleware/auth';
 import { createError } from '../middleware/errorHandler';
 import { logger } from '../utils/logger';
@@ -9,53 +9,20 @@ export class UserController {
     const { page = 1, limit = 20, search, role, sortBy = 'created_at', sortOrder = 'desc' } = req.query;
     const offset = (Number(page) - 1) * Number(limit);
 
-    let query = prisma.user.findMany({
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        role: true,
-        avatar: true,
-        is_active: true,
-        last_login: true,
-        created_at: true
-      },
-      where: {
-        workspace_id: req.user!.workspaceId,
-        AND: [
-          {
-            id: {
-              gte: offset,
-              lte: offset + Number(limit) - 1
-            }
-          },
-          {
-            role: role ? { equals: role } : undefined
-          },
-          {
-            OR: [
-              {
-                name: {
-                  contains: search,
-                  mode: 'insensitive'
-                }
-              },
-              {
-                email: {
-                  contains: search,
-                  mode: 'insensitive'
-                }
-              }
-            ]
-          }
-        ]
-      },
-      orderBy: {
-        [sortBy as string]: sortOrder === 'asc' ? 'asc' : 'desc'
-      },
-      take: Number(limit),
-      count: true
-    });
+    let query = supabase
+      .from('users')
+      .select('id, name, email, role, avatar, is_active, last_login, created_at', { count: 'exact' })
+      .eq('workspace_id', req.user!.workspaceId)
+      .range(offset, offset + Number(limit) - 1)
+      .order(sortBy as string, { ascending: sortOrder === 'asc' });
+
+    if (search) {
+      query = query.or(`name.ilike.%${search}%,email.ilike.%${search}%`);
+    }
+
+    if (role) {
+      query = query.eq('role', role);
+    }
 
     const { data: users, error, count } = await query;
 
@@ -79,22 +46,12 @@ export class UserController {
   async getUserById(req: AuthRequest, res: Response) {
     const { id } = req.params;
 
-    const { data: user, error } = await prisma.user.findUnique({
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        role: true,
-        avatar: true,
-        is_active: true,
-        last_login: true,
-        created_at: true
-      },
-      where: {
-        id: id,
-        workspace_id: req.user!.workspaceId
-      }
-    });
+    const { data: user, error } = await supabase
+      .from('users')
+      .select('id, name, email, role, avatar, is_active, last_login, created_at')
+      .eq('id', id)
+      .eq('workspace_id', req.user!.workspaceId)
+      .single();
 
     if (error || !user) {
       throw createError('User not found', 404);
@@ -111,22 +68,12 @@ export class UserController {
     const { name, role, isActive } = req.body;
 
     // Check if user exists and belongs to workspace
-    const { data: existingUser, error: fetchError } = await prisma.user.findUnique({
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        role: true,
-        avatar: true,
-        is_active: true,
-        last_login: true,
-        created_at: true
-      },
-      where: {
-        id: id,
-        workspace_id: req.user!.workspaceId
-      }
-    });
+    const { data: existingUser, error: fetchError } = await supabase
+      .from('users')
+      .select('*')
+      .eq('id', id)
+      .eq('workspace_id', req.user!.workspaceId)
+      .single();
 
     if (fetchError || !existingUser) {
       throw createError('User not found', 404);
@@ -145,22 +92,12 @@ export class UserController {
     if (role !== undefined) updateData.role = role;
     if (isActive !== undefined) updateData.is_active = isActive;
 
-    const { data: user, error } = await prisma.user.update({
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        role: true,
-        avatar: true,
-        is_active: true,
-        last_login: true,
-        created_at: true
-      },
-      where: {
-        id: id
-      },
-      data: updateData
-    });
+    const { data: user, error } = await supabase
+      .from('users')
+      .update(updateData)
+      .eq('id', id)
+      .select('id, name, email, role, avatar, is_active, last_login, created_at')
+      .single();
 
     if (error) {
       logger.error('Error updating user:', error);
@@ -169,15 +106,11 @@ export class UserController {
 
     // Update workspace member role if changed
     if (role !== undefined) {
-      await prisma.workspaceMember.updateMany({
-        where: {
-          user_id: id,
-          workspace_id: req.user!.workspaceId
-        },
-        data: {
-          role: role
-        }
-      });
+      await supabase
+        .from('workspace_members')
+        .update({ role })
+        .eq('user_id', id)
+        .eq('workspace_id', req.user!.workspaceId);
     }
 
     res.json({
@@ -195,38 +128,32 @@ export class UserController {
     }
 
     // Check if user exists and belongs to workspace
-    const { data: existingUser, error: fetchError } = await prisma.user.findUnique({
-      select: {
-        name: true
-      },
-      where: {
-        id: id,
-        workspace_id: req.user!.workspaceId
-      }
-    });
+    const { data: existingUser, error: fetchError } = await supabase
+      .from('users')
+      .select('name')
+      .eq('id', id)
+      .eq('workspace_id', req.user!.workspaceId)
+      .single();
 
     if (fetchError || !existingUser) {
       throw createError('User not found', 404);
     }
 
     // Remove from workspace members
-    await prisma.workspaceMember.deleteMany({
-      where: {
-        user_id: id,
-        workspace_id: req.user!.workspaceId
-      }
-    });
+    await supabase
+      .from('workspace_members')
+      .delete()
+      .eq('user_id', id)
+      .eq('workspace_id', req.user!.workspaceId);
 
     // Deactivate user instead of deleting
-    const { error } = await prisma.user.update({
-      where: {
-        id: id
-      },
-      data: {
+    const { error } = await supabase
+      .from('users')
+      .update({ 
         is_active: false,
         updated_at: new Date().toISOString()
-      }
-    });
+      })
+      .eq('id', id);
 
     if (error) {
       logger.error('Error deleting user:', error);
@@ -245,37 +172,29 @@ export class UserController {
     const offset = (Number(page) - 1) * Number(limit);
 
     // Check if user exists and belongs to workspace
-    const user = await prisma.user.findUnique({
-      select: {
-        id: true
-      },
-      where: {
-        id: id,
-        workspace_id: req.user!.workspaceId
-      }
-    });
+    const { data: user, error: userError } = await supabase
+      .from('users')
+      .select('id')
+      .eq('id', id)
+      .eq('workspace_id', req.user!.workspaceId)
+      .single();
 
-    if (!user) {
+    if (userError || !user) {
       throw createError('User not found', 404);
     }
 
-    const activities = await prisma.auditLog.findMany({
-      where: {
-        user_id: id,
-        workspace_id: req.user!.workspaceId
-      },
-      orderBy: {
-        created_at: 'desc'
-      },
-      skip: offset,
-      take: Number(limit)
-    });
-    const count = await prisma.auditLog.count({
-      where: {
-        user_id: id,
-        workspace_id: req.user!.workspaceId
-      }
-    });
+    const { data: activities, error, count } = await supabase
+      .from('audit_logs')
+      .select('*', { count: 'exact' })
+      .eq('user_id', id)
+      .eq('workspace_id', req.user!.workspaceId)
+      .range(offset, offset + Number(limit) - 1)
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      logger.error('Error fetching user activity:', error);
+      throw createError('Failed to fetch user activity', 500);
+    }
 
     res.json({
       success: true,
@@ -283,8 +202,8 @@ export class UserController {
       pagination: {
         page: Number(page),
         limit: Number(limit),
-        total: count,
-        totalPages: Math.ceil(count / Number(limit))
+        total: count || 0,
+        totalPages: Math.ceil((count || 0) / Number(limit))
       }
     });
   }

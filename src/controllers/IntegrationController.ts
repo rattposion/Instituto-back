@@ -1,5 +1,5 @@
 import { Response } from 'express';
-import { prisma } from '../config/database';
+import { supabase } from '../config/database';
 import { AuthRequest } from '../middleware/auth';
 import { createError } from '../middleware/errorHandler';
 import { logger } from '../utils/logger';
@@ -10,44 +10,24 @@ export class IntegrationController {
     const { page = 1, limit = 20, search, type, status, sortBy = 'created_at', sortOrder = 'desc' } = req.query;
     const offset = (Number(page) - 1) * Number(limit);
 
-    let query = prisma.integration.findMany({
-      where: {
-        workspaceId: req.user!.workspaceId,
-        AND: [
-          {
-            id: {
-              gte: offset,
-              lte: offset + Number(limit) - 1
-            }
-          },
-          {
-            OR: [
-              {
-                name: {
-                  contains: search,
-                  mode: 'insensitive'
-                }
-              },
-              {
-                description: {
-                  contains: search,
-                  mode: 'insensitive'
-                }
-              }
-            ]
-          },
-          {
-            type: type ? type : undefined,
-            status: status ? status : undefined
-          }
-        ]
-      },
-      orderBy: {
-        [sortBy as string]: sortOrder === 'asc' ? 'asc' : 'desc'
-      },
-      take: Number(limit),
-      skip: offset
-    });
+    let query = supabase
+      .from('integrations')
+      .select('*', { count: 'exact' })
+      .eq('workspace_id', req.user!.workspaceId)
+      .range(offset, offset + Number(limit) - 1)
+      .order(sortBy as string, { ascending: sortOrder === 'asc' });
+
+    if (search) {
+      query = query.or(`name.ilike.%${search}%,description.ilike.%${search}%`);
+    }
+
+    if (type) {
+      query = query.eq('type', type);
+    }
+
+    if (status) {
+      query = query.eq('status', status);
+    }
 
     const { data: integrations, error, count } = await query;
 
@@ -71,12 +51,12 @@ export class IntegrationController {
   async getIntegrationById(req: AuthRequest, res: Response) {
     const { id } = req.params;
 
-    const { data: integration, error } = await prisma.integration.findUnique({
-      where: {
-        id,
-        workspaceId: req.user!.workspaceId
-      }
-    });
+    const { data: integration, error } = await supabase
+      .from('integrations')
+      .select('*')
+      .eq('id', id)
+      .eq('workspace_id', req.user!.workspaceId)
+      .single();
 
     if (error || !integration) {
       throw createError('Integration not found', 404);
@@ -99,18 +79,20 @@ export class IntegrationController {
 
     const integrationData = {
       id: uuidv4(),
-      workspaceId: req.user!.workspaceId,
+      workspace_id: req.user!.workspaceId,
       type,
       name,
       description: description || '',
       config: config || {},
       status: 'inactive',
-      pixelsConnected: 0
+      pixels_connected: 0
     };
 
-    const { data: integration, error } = await prisma.integration.create({
-      data: integrationData
-    });
+    const { data: integration, error } = await supabase
+      .from('integrations')
+      .insert(integrationData)
+      .select()
+      .single();
 
     if (error) {
       logger.error('Error creating integration:', error);
@@ -128,19 +110,19 @@ export class IntegrationController {
     const { name, description, config, status } = req.body;
 
     // Check if integration exists and belongs to workspace
-    const { data: existingIntegration, error: fetchError } = await prisma.integration.findUnique({
-      where: {
-        id,
-        workspaceId: req.user!.workspaceId
-      }
-    });
+    const { data: existingIntegration, error: fetchError } = await supabase
+      .from('integrations')
+      .select('*')
+      .eq('id', id)
+      .eq('workspace_id', req.user!.workspaceId)
+      .single();
 
     if (fetchError || !existingIntegration) {
       throw createError('Integration not found', 404);
     }
 
     const updateData: any = {
-      updatedAt: new Date().toISOString()
+      updated_at: new Date().toISOString()
     };
 
     if (name !== undefined) updateData.name = name;
@@ -148,12 +130,12 @@ export class IntegrationController {
     if (config !== undefined) updateData.config = config;
     if (status !== undefined) updateData.status = status;
 
-    const { data: integration, error } = await prisma.integration.update({
-      where: {
-        id
-      },
-      data: updateData
-    });
+    const { data: integration, error } = await supabase
+      .from('integrations')
+      .update(updateData)
+      .eq('id', id)
+      .select()
+      .single();
 
     if (error) {
       logger.error('Error updating integration:', error);
@@ -170,25 +152,21 @@ export class IntegrationController {
     const { id } = req.params;
 
     // Check if integration exists and belongs to workspace
-    const { data: existingIntegration, error: fetchError } = await prisma.integration.findUnique({
-      where: {
-        id,
-        workspaceId: req.user!.workspaceId
-      },
-      select: {
-        name: true
-      }
-    });
+    const { data: existingIntegration, error: fetchError } = await supabase
+      .from('integrations')
+      .select('name')
+      .eq('id', id)
+      .eq('workspace_id', req.user!.workspaceId)
+      .single();
 
     if (fetchError || !existingIntegration) {
       throw createError('Integration not found', 404);
     }
 
-    const { error } = await prisma.integration.delete({
-      where: {
-        id
-      }
-    });
+    const { error } = await supabase
+      .from('integrations')
+      .delete()
+      .eq('id', id);
 
     if (error) {
       logger.error('Error deleting integration:', error);
@@ -205,12 +183,12 @@ export class IntegrationController {
     const { id } = req.params;
 
     // Check if integration exists and belongs to workspace
-    const { data: integration, error: fetchError } = await prisma.integration.findUnique({
-      where: {
-        id,
-        workspaceId: req.user!.workspaceId
-      }
-    });
+    const { data: integration, error: fetchError } = await supabase
+      .from('integrations')
+      .select('*')
+      .eq('id', id)
+      .eq('workspace_id', req.user!.workspaceId)
+      .single();
 
     if (fetchError || !integration) {
       throw createError('Integration not found', 404);
@@ -220,15 +198,13 @@ export class IntegrationController {
     const testResult = await this.performIntegrationTest(integration);
 
     // Update integration status based on test result
-    await prisma.integration.update({
-      where: {
-        id
-      },
-      data: {
+    await supabase
+      .from('integrations')
+      .update({
         status: testResult.success ? 'active' : 'error',
-        lastSync: new Date().toISOString()
-      }
-    });
+        last_sync: new Date().toISOString()
+      })
+      .eq('id', id);
 
     res.json({
       success: true,
@@ -240,12 +216,12 @@ export class IntegrationController {
     const { id } = req.params;
 
     // Check if integration exists and belongs to workspace
-    const { data: integration, error: fetchError } = await prisma.integration.findUnique({
-      where: {
-        id,
-        workspaceId: req.user!.workspaceId
-      }
-    });
+    const { data: integration, error: fetchError } = await supabase
+      .from('integrations')
+      .select('*')
+      .eq('id', id)
+      .eq('workspace_id', req.user!.workspaceId)
+      .single();
 
     if (fetchError || !integration) {
       throw createError('Integration not found', 404);
@@ -255,16 +231,14 @@ export class IntegrationController {
     const syncResult = await this.performIntegrationSync(integration);
 
     // Update integration with sync results
-    await prisma.integration.update({
-      where: {
-        id
-      },
-      data: {
+    await supabase
+      .from('integrations')
+      .update({
         status: syncResult.success ? 'active' : 'error',
-        lastSync: new Date().toISOString(),
-        pixelsConnected: syncResult.pixelsConnected || integration.pixelsConnected
-      }
-    });
+        last_sync: new Date().toISOString(),
+        pixels_connected: syncResult.pixelsConnected || integration.pixels_connected
+      })
+      .eq('id', id);
 
     res.json({
       success: true,

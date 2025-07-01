@@ -3,6 +3,7 @@ import { Request, Response, NextFunction } from 'express';
 import { logger } from '../utils/logger';
 
 const rateLimiter = new RateLimiterMemory({
+  keyGenerator: (req: Request) => req.ip,
   points: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || '100'),
   duration: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '900000') / 1000, // Convert to seconds
 });

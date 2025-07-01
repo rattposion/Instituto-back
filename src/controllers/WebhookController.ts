@@ -1,5 +1,5 @@
 import { Request, Response } from 'express';
-import { prisma } from '../config/database';
+import { supabase } from '../config/database';
 import { createError } from '../middleware/errorHandler';
 import { logger } from '../utils/logger';
 import { verifyHmacSignature } from '../utils/crypto';
@@ -13,13 +13,11 @@ export class WebhookController {
 
     try {
       // Verify pixel exists
-      const { data: pixel, error: pixelError } = await prisma
-        .queryRaw`
-          SELECT id, workspace_id
-          FROM pixels
-          WHERE pixel_id = ${pixelId}
-          LIMIT 1
-        `;
+      const { data: pixel, error: pixelError } = await supabase
+        .from('pixels')
+        .select('id, workspace_id')
+        .eq('pixel_id', pixelId)
+        .single();
 
       if (pixelError || !pixel) {
         throw createError('Pixel not found', 404);
@@ -68,14 +66,12 @@ export class WebhookController {
 
     try {
       // Verify integration exists
-      const { data: integration, error: integrationError } = await prisma
-        .queryRaw`
-          SELECT *
-          FROM integrations
-          WHERE id = ${integrationId}
-          AND type = ${'gtm'}
-          LIMIT 1
-        `;
+      const { data: integration, error: integrationError } = await supabase
+        .from('integrations')
+        .select('*')
+        .eq('id', integrationId)
+        .eq('type', 'gtm')
+        .single();
 
       if (integrationError || !integration) {
         throw createError('Integration not found', 404);
@@ -98,14 +94,12 @@ export class WebhookController {
 
     try {
       // Verify integration exists
-      const { data: integration, error: integrationError } = await prisma
-        .queryRaw`
-          SELECT *
-          FROM integrations
-          WHERE id = ${integrationId}
-          AND type = ${'shopify'}
-          LIMIT 1
-        `;
+      const { data: integration, error: integrationError } = await supabase
+        .from('integrations')
+        .select('*')
+        .eq('id', integrationId)
+        .eq('type', 'shopify')
+        .single();
 
       if (integrationError || !integration) {
         throw createError('Integration not found', 404);
@@ -142,14 +136,12 @@ export class WebhookController {
 
     try {
       // Verify integration exists
-      const { data: integration, error: integrationError } = await prisma
-        .queryRaw`
-          SELECT *
-          FROM integrations
-          WHERE id = ${integrationId}
-          AND type = ${'webhook'}
-          LIMIT 1
-        `;
+      const { data: integration, error: integrationError } = await supabase
+        .from('integrations')
+        .select('*')
+        .eq('id', integrationId)
+        .eq('type', 'webhook')
+        .single();
 
       if (integrationError || !integration) {
         throw createError('Integration not found', 404);
@@ -199,11 +191,9 @@ export class WebhookController {
         processed: false
       };
 
-      await prisma
-        .queryRaw`
-          INSERT INTO events (id, pixel_id, event_name, event_type, parameters, source, timestamp, processed)
-          VALUES (${eventData.id}, ${eventData.pixel_id}, ${eventData.event_name}, ${eventData.event_type}, ${eventData.parameters}, ${eventData.source}, ${eventData.timestamp}, ${eventData.processed})
-        `;
+      await supabase
+        .from('events')
+        .insert(eventData);
 
       logger.info(`Lead event created for pixel ${pixel.id}`);
     } catch (error) {
@@ -215,12 +205,13 @@ export class WebhookController {
     try {
       // Process GTM container data
       if (payload.type === 'container_version_published') {
-        await prisma
-          .queryRaw`
-            UPDATE integrations
-            SET last_sync = ${new Date().toISOString()}, status = ${'active'}
-            WHERE id = ${integration.id}
-          `;
+        await supabase
+          .from('integrations')
+          .update({
+            last_sync: new Date().toISOString(),
+            status: 'active'
+          })
+          .eq('id', integration.id);
 
         logger.info(`GTM container updated for integration ${integration.id}`);
       }
@@ -232,12 +223,10 @@ export class WebhookController {
   private async processShopifyData(integration: any, payload: any) {
     try {
       // Get connected pixels for this integration
-      const { data: pixels } = await prisma
-        .queryRaw`
-          SELECT id
-          FROM pixels
-          WHERE workspace_id = ${integration.workspace_id}
-        `;
+      const { data: pixels } = await supabase
+        .from('pixels')
+        .select('id')
+        .eq('workspace_id', integration.workspace_id);
 
       if (!pixels || pixels.length === 0) {
         return;
@@ -284,11 +273,9 @@ export class WebhookController {
       processed: false
     };
 
-    await prisma
-      .queryRaw`
-        INSERT INTO events (id, pixel_id, event_name, event_type, parameters, source, timestamp, processed)
-        VALUES (${eventData.id}, ${eventData.pixel_id}, ${eventData.event_name}, ${eventData.event_type}, ${eventData.parameters}, ${eventData.source}, ${eventData.timestamp}, ${eventData.processed})
-      `;
+    await supabase
+      .from('events')
+      .insert(eventData);
 
     logger.info(`Shopify ${eventName} event created for pixel ${pixel.id}`);
   }

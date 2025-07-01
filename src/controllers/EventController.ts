@@ -1,5 +1,5 @@
 import { Response } from 'express';
-import { prisma } from '../config/database';
+import { supabase } from '../config/database';
 import { AuthRequest } from '../middleware/auth';
 import { createError } from '../middleware/errorHandler';
 import { logger } from '../utils/logger';
@@ -22,300 +22,42 @@ export class EventController {
     
     const offset = (Number(page) - 1) * Number(limit);
 
-    let query = prisma.event.findMany({
-      select: {
-        id: true,
-        event_name: true,
-        timestamp: true,
-        processed: true,
-        error_message: true,
-        parameters: true,
-        pixels: {
-          select: {
-            id: true,
-            name: true,
-            workspace_id: true
-          }
-        }
-      },
-      where: {
-        pixels: {
-          workspace_id: req.user!.workspaceId
-        }
-      },
-      take: Number(limit),
-      skip: offset,
-      orderBy: {
-        [sortBy as string]: sortOrder === 'asc' ? 'asc' : 'desc'
-      }
-    });
+    let query = supabase
+      .from('events')
+      .select(`
+        *,
+        pixels!inner(id, name, workspace_id)
+      `, { count: 'exact' })
+      .eq('pixels.workspace_id', req.user!.workspaceId)
+      .range(offset, offset + Number(limit) - 1)
+      .order(sortBy as string, { ascending: sortOrder === 'asc' });
 
     if (search) {
-      query = prisma.event.findMany({
-        where: {
-          OR: [
-            { event_name: { contains: search, mode: 'insensitive' } },
-            { source: { contains: search, mode: 'insensitive' } }
-          ]
-        },
-        select: {
-          id: true,
-          event_name: true,
-          timestamp: true,
-          processed: true,
-          error_message: true,
-          parameters: true,
-          pixels: {
-            select: {
-              id: true,
-              name: true,
-              workspace_id: true
-            }
-          }
-        },
-        where: {
-          pixels: {
-            workspace_id: req.user!.workspaceId
-          }
-        },
-        take: Number(limit),
-        skip: offset,
-        orderBy: {
-          [sortBy as string]: sortOrder === 'asc' ? 'asc' : 'desc'
-        }
-      });
+      query = query.or(`event_name.ilike.%${search}%,source.ilike.%${search}%`);
     }
 
     if (pixelId) {
-      query = prisma.event.findMany({
-        where: {
-          pixel_id: pixelId
-        },
-        select: {
-          id: true,
-          event_name: true,
-          timestamp: true,
-          processed: true,
-          error_message: true,
-          parameters: true,
-          pixels: {
-            select: {
-              id: true,
-              name: true,
-              workspace_id: true
-            }
-          }
-        },
-        where: {
-          pixels: {
-            workspace_id: req.user!.workspaceId
-          }
-        },
-        take: Number(limit),
-        skip: offset,
-        orderBy: {
-          [sortBy as string]: sortOrder === 'asc' ? 'asc' : 'desc'
-        }
-      });
+      query = query.eq('pixel_id', pixelId);
     }
 
     if (eventName) {
-      query = prisma.event.findMany({
-        where: {
-          event_name: eventName
-        },
-        select: {
-          id: true,
-          event_name: true,
-          timestamp: true,
-          processed: true,
-          error_message: true,
-          parameters: true,
-          pixels: {
-            select: {
-              id: true,
-              name: true,
-              workspace_id: true
-            }
-          }
-        },
-        where: {
-          pixels: {
-            workspace_id: req.user!.workspaceId
-          }
-        },
-        take: Number(limit),
-        skip: offset,
-        orderBy: {
-          [sortBy as string]: sortOrder === 'asc' ? 'asc' : 'desc'
-        }
-      });
+      query = query.eq('event_name', eventName);
     }
 
     if (status === 'processed') {
-      query = prisma.event.findMany({
-        where: {
-          processed: true
-        },
-        select: {
-          id: true,
-          event_name: true,
-          timestamp: true,
-          processed: true,
-          error_message: true,
-          parameters: true,
-          pixels: {
-            select: {
-              id: true,
-              name: true,
-              workspace_id: true
-            }
-          }
-        },
-        where: {
-          pixels: {
-            workspace_id: req.user!.workspaceId
-          }
-        },
-        take: Number(limit),
-        skip: offset,
-        orderBy: {
-          [sortBy as string]: sortOrder === 'asc' ? 'asc' : 'desc'
-        }
-      });
+      query = query.eq('processed', true);
     } else if (status === 'error') {
-      query = prisma.event.findMany({
-        where: {
-          error_message: { not: null }
-        },
-        select: {
-          id: true,
-          event_name: true,
-          timestamp: true,
-          processed: true,
-          error_message: true,
-          parameters: true,
-          pixels: {
-            select: {
-              id: true,
-              name: true,
-              workspace_id: true
-            }
-          }
-        },
-        where: {
-          pixels: {
-            workspace_id: req.user!.workspaceId
-          }
-        },
-        take: Number(limit),
-        skip: offset,
-        orderBy: {
-          [sortBy as string]: sortOrder === 'asc' ? 'asc' : 'desc'
-        }
-      });
+      query = query.not('error_message', 'is', null);
     } else if (status === 'pending') {
-      query = prisma.event.findMany({
-        where: {
-          processed: false,
-          error_message: null
-        },
-        select: {
-          id: true,
-          event_name: true,
-          timestamp: true,
-          processed: true,
-          error_message: true,
-          parameters: true,
-          pixels: {
-            select: {
-              id: true,
-              name: true,
-              workspace_id: true
-            }
-          }
-        },
-        where: {
-          pixels: {
-            workspace_id: req.user!.workspaceId
-          }
-        },
-        take: Number(limit),
-        skip: offset,
-        orderBy: {
-          [sortBy as string]: sortOrder === 'asc' ? 'asc' : 'desc'
-        }
-      });
+      query = query.eq('processed', false).is('error_message', null);
     }
 
     if (startDate) {
-      query = prisma.event.findMany({
-        where: {
-          timestamp: {
-            gte: new Date(startDate)
-          }
-        },
-        select: {
-          id: true,
-          event_name: true,
-          timestamp: true,
-          processed: true,
-          error_message: true,
-          parameters: true,
-          pixels: {
-            select: {
-              id: true,
-              name: true,
-              workspace_id: true
-            }
-          }
-        },
-        where: {
-          pixels: {
-            workspace_id: req.user!.workspaceId
-          }
-        },
-        take: Number(limit),
-        skip: offset,
-        orderBy: {
-          [sortBy as string]: sortOrder === 'asc' ? 'asc' : 'desc'
-        }
-      });
+      query = query.gte('timestamp', startDate);
     }
 
     if (endDate) {
-      query = prisma.event.findMany({
-        where: {
-          timestamp: {
-            lte: new Date(endDate)
-          }
-        },
-        select: {
-          id: true,
-          event_name: true,
-          timestamp: true,
-          processed: true,
-          error_message: true,
-          parameters: true,
-          pixels: {
-            select: {
-              id: true,
-              name: true,
-              workspace_id: true
-            }
-          }
-        },
-        where: {
-          pixels: {
-            workspace_id: req.user!.workspaceId
-          }
-        },
-        take: Number(limit),
-        skip: offset,
-        orderBy: {
-          [sortBy as string]: sortOrder === 'asc' ? 'asc' : 'desc'
-        }
-      });
+      query = query.lte('timestamp', endDate);
     }
 
     const { data: events, error, count } = await query;
@@ -340,26 +82,15 @@ export class EventController {
   async getEventById(req: AuthRequest, res: Response) {
     const { id } = req.params;
 
-    const { data: event, error } = await prisma.event.findUnique({
-      where: {
-        id: id
-      },
-      select: {
-        id: true,
-        event_name: true,
-        timestamp: true,
-        processed: true,
-        error_message: true,
-        parameters: true,
-        pixels: {
-          select: {
-            id: true,
-            name: true,
-            workspace_id: true
-          }
-        }
-      }
-    });
+    const { data: event, error } = await supabase
+      .from('events')
+      .select(`
+        *,
+        pixels!inner(id, name, workspace_id)
+      `)
+      .eq('id', id)
+      .eq('pixels.workspace_id', req.user!.workspaceId)
+      .single();
 
     if (error || !event) {
       throw createError('Event not found', 404);
